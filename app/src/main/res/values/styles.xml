@@ -1,0 +1,8 @@
+<resources>
+    <style name="CyferTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">#050505</item>
+        <item name="android:colorAccent">#FFFFFF</item>
+    </style>
+</resources>

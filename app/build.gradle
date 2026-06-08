@@ -1,0 +1,133 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+    id "org.jetbrains.kotlin.plugin.compose"
+    id "org.jetbrains.kotlin.plugin.serialization"
+}
+
+android {
+    namespace "app.cyfer.streaming.android"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "app.cyfer.streaming.android"
+        minSdk 26
+        targetSdk 36
+        versionCode 2
+        versionName "0.2.0"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        compose true
+        buildConfig true
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    // Release-signing config. Reads from environment variables OR from
+    // app/keystore.properties (which is gitignored). Leave blank during
+    // dev — the release build will fall back to the debug signing config
+    // so `assembleRelease` doesn't fail on a fresh checkout.
+    def keystorePropsFile = rootProject.file("app/keystore.properties")
+    def keystoreProps = new Properties()
+    if (keystorePropsFile.exists()) {
+        keystorePropsFile.withInputStream { keystoreProps.load(it) }
+    }
+    signingConfigs {
+        release {
+            def storePath = System.getenv("CYFER_KEYSTORE") ?: keystoreProps.getProperty("storeFile")
+            def storePw   = System.getenv("CYFER_KEYSTORE_PW") ?: keystoreProps.getProperty("storePassword")
+            def keyAlias_ = System.getenv("CYFER_KEY_ALIAS") ?: keystoreProps.getProperty("keyAlias")
+            def keyPw     = System.getenv("CYFER_KEY_PW") ?: keystoreProps.getProperty("keyPassword")
+            if (storePath && storePw && keyAlias_ && keyPw) {
+                storeFile     = file(storePath)
+                storePassword = storePw
+                keyAlias      = keyAlias_
+                keyPassword   = keyPw
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // R8 trims the APK ~30-40% by stripping unused Compose +
+            // Material classes. ProGuard rules stay light because most
+            // libraries (Retrofit / OkHttp / Coil) ship their own.
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+            // Use the configured release signing only if keystore was found;
+            // otherwise fall back to debug so unsigned releases still build
+            // for CI smoke tests.
+            signingConfig signingConfigs.release.storeFile ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    // Produce one APK per ABI alongside the universal one so it's easy
+    // to ship a smaller per-device build (≈70-80 MB instead of 200 MB).
+    splits {
+        abi {
+            enable true
+            reset()
+            include "arm64-v8a", "armeabi-v7a", "x86_64"
+            universalApk true
+        }
+    }
+}
+
+dependencies {
+    implementation platform("androidx.compose:compose-bom:2025.10.01")
+    implementation "androidx.activity:activity-compose:1.12.4"
+    implementation "androidx.compose.ui:ui"
+    implementation "androidx.compose.ui:ui-graphics"
+    implementation "androidx.compose.ui:ui-tooling-preview"
+    implementation "androidx.compose.material:material-icons-extended"
+    implementation "androidx.compose.material3:material3:1.4.0-alpha18"
+
+    // Networking – TMDb API
+    implementation "com.squareup.retrofit2:retrofit:2.11.0"
+    implementation "com.squareup.retrofit2:converter-gson:2.11.0"
+    implementation "com.squareup.okhttp3:okhttp:4.12.0"
+
+    // Image loading – posters & backdrops
+    implementation "io.coil-kt:coil-compose:2.7.0"
+    // SVG decoder so the tech badges (HDR10, Dolby Digital, DTS, …) load
+    // from the same bundled `assets/logos/*.svg` files the desktop uses.
+    implementation "io.coil-kt:coil-svg:2.7.0"
+
+    // Settings persistence
+    implementation "androidx.datastore:datastore-preferences:1.1.7"
+    implementation "org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3"
+
+    // Lifecycle-aware Flow collection in Compose (collectAsStateWithLifecycle)
+    implementation "androidx.lifecycle:lifecycle-runtime-compose:2.8.7"
+
+    // MPV player (community AAR – prebuilt libmpv.so for all ABIs)
+    implementation "io.github.abdallahmehiz:mpv-android-lib:0.1.12"
+
+    // On-device torrent engine — libtorrent4j 2.0 line (stable simple
+    // API). Per-ABI native artifacts so the APK runs on emulator
+    // (x86_64) and devices (arm64-v8a, armeabi-v7a).
+    implementation "org.libtorrent4j:libtorrent4j:2.0.6-26"
+    implementation "org.libtorrent4j:libtorrent4j-android-arm64:2.0.6-26"
+    implementation "org.libtorrent4j:libtorrent4j-android-arm:2.0.6-26"
+    implementation "org.libtorrent4j:libtorrent4j-android-x86_64:2.0.6-26"
+
+    // Tiny in-process HTTP server — exposes the largest video file in a
+    // torrent at http://127.0.0.1:<port>/stream so mpv can play it
+    // straight while libtorrent is still downloading the rest.
+    implementation "org.nanohttpd:nanohttpd:2.3.1"
+
+    // WorkManager — runs the nightly episode-air notification job.
+    implementation "androidx.work:work-runtime-ktx:2.10.0"
+
+    debugImplementation "androidx.compose.ui:ui-tooling"
+    debugImplementation "androidx.compose.ui:ui-test-manifest"
+}

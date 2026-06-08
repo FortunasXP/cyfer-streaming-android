@@ -1,0 +1,44 @@
+# ── Build outputs ──
+/build/
+/app/build/
+**/build/
+**/.cxx/
+**/.gradle/
+out/
+captures/
+
+# ── Local environment / IDE ──
+local.properties
+*.iml
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ── Signing ──
+# Real keystore is gitignored — provide your own per app/keystore.properties.example.
+app/keystore.properties
+*.jks
+*.keystore
+*.p12
+
+# ── Logs / dumps captured during dev ──
+*.log
+hs_err_pid*
+*.hprof
+ui*.xml
+window.xml
+
+# ── Emulator screenshots accumulated during development ──
+emulator-*.png
+cs-*.png
+*.png
+!app/src/main/res/**/*.png
+!app/src/**/*.png
+
+# ── APK build outputs (released via GitHub Releases, not committed) ──
+*.apk
+*.aab
+
+# ── Compose / Android temporary ──
+.kotlin/
