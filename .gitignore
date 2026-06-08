@@ -40,5 +40,8 @@ cs-*.png
 *.apk
 *.aab
 
+# ── Local AAR dependencies (fetched via scripts/fetch-mpv-libdovi.ps1) ──
+app/libs/*.aar
+
 # ── Compose / Android temporary ──
 .kotlin/

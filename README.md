@@ -40,11 +40,22 @@ Requires Android Studio Koala+ (AGP 8.x) and an Android SDK with platform 34+ in
 
 ```powershell
 cd android
-gradle :app:assembleDebug          # Debug APKs in app/build/outputs/apk/debug/
-gradle :app:installDebug           # Install on the connected device / emulator
+# One-time: fetch the libdovi-enabled mpv-android-lib AAR (~155 MB,
+# not committed to git — pulled from FortunasXP/mpv-android-libdovi releases).
+.\scripts\fetch-mpv-libdovi.ps1     # bash equivalent: ./scripts/fetch-mpv-libdovi.sh
+gradle :app:assembleDebug           # Debug APKs in app/build/outputs/apk/debug/
+gradle :app:installDebug            # Install on the connected device / emulator
 ```
 
 To produce a release-signed build, copy `app/keystore.properties.example` to `app/keystore.properties`, point it at your keystore, then run `gradle :app:assembleRelease`.
+
+### About the bundled mpv
+
+The player uses a **custom rebuild of mpv-android** with `libdovi` statically linked into libplacebo + ffmpeg, enabling full **Dolby Vision Profile 5 / 8.1 / 8.4** RPU reshape (the original `io.github.abdallahmehiz:mpv-android-lib:0.1.12` only ships the HDR10 fallback path).
+
+- Source: https://github.com/FortunasXP/mpv-android-libdovi (libdovi branch)
+- Release: https://github.com/FortunasXP/mpv-android-libdovi/releases/latest
+- Build pipeline: Docker + WSL2 (`mpv-android-libdovi-work/` sibling directory)
 
 ## Project layout
 

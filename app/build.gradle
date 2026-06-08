@@ -110,7 +110,11 @@ dependencies {
     implementation "androidx.lifecycle:lifecycle-runtime-compose:2.8.7"
 
     // MPV player (community AAR – prebuilt libmpv.so for all ABIs)
-    implementation "io.github.abdallahmehiz:mpv-android-lib:0.1.12"
+    // Locally-rebuilt mpv-android-lib with libdovi statically linked into
+    // libplacebo + ffmpeg (Dolby Vision Profile 5/8 RPU reshape). Original
+    // 0.1.12 shell preserved (classes.jar + libplayer.so), only libmpv.so
+    // + ffmpeg shared libs swapped. See ../../mpv-android-libdovi-work/.
+    implementation files("libs/mpv-android-lib-libdovi.aar")
 
     // On-device torrent engine — libtorrent4j 2.0 line (stable simple
     // API). Per-ABI native artifacts so the APK runs on emulator
