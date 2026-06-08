@@ -35,8 +35,11 @@ import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Subtitles
@@ -69,9 +72,11 @@ import app.cyfer.streaming.android.data.torrent.TechTag
 import app.cyfer.streaming.android.player.HdrDisplayCapabilities
 import app.cyfer.streaming.android.player.HdrDisplayDetector
 import app.cyfer.streaming.android.player.HdrVideoMetadata
+import app.cyfer.streaming.android.player.MpvChapter
 import app.cyfer.streaming.android.player.MpvPlaybackState
 import app.cyfer.streaming.android.player.MpvPlayer
 import app.cyfer.streaming.android.player.MpvPlayerView
+import app.cyfer.streaming.android.player.StreamHealth
 import app.cyfer.streaming.android.ui.common.TechLogoBadge
 import app.cyfer.streaming.android.player.MpvTrack
 import app.cyfer.streaming.android.ui.theme.*
@@ -105,8 +110,12 @@ fun PlayerScreen(
     var isSeeking by remember { mutableStateOf(false) }
     var seekPosition by remember { mutableFloatStateOf(0f) }
     var pickerOpen by remember { mutableStateOf<PickerKind?>(null) }
-    var onlineSubsOpen by remember { mutableStateOf(false) }
     var optionsOpen by remember { mutableStateOf(false) }
+    // Lock mode: when on, the entire control + gesture layer is sealed
+    // off so accidental touches (pocket, in-bed viewing) can't seek or
+    // toggle anything. A single tap surfaces a brief unlock affordance.
+    var locked by remember { mutableStateOf(false) }
+    var unlockHintAt by remember { mutableStateOf(0L) }
     var playbackSpeed by remember(url) { mutableFloatStateOf(1.0f) }
     var aspectMode by remember(url) { mutableStateOf("Default") }
     var subSize by remember(url) { mutableStateOf("Medium") }
@@ -299,6 +308,75 @@ fun PlayerScreen(
 
     LaunchedEffect(url) { MpvPlayer.loadUrl(url, title) }
 
+    // ── First-frame watchdog (HW → SW fallback) ──────────────────────
+    // The static vd-lavc-software-fallback=1 mpv flag only catches hard
+    // decoder errors. Some chipsets accept the stream then silently
+    // produce no frames on HEVC Main 10 / AV1. Detect by checking
+    // position is still 0 six seconds after loadfile; if so, force SW
+    // and reload. Only fires once per URL to avoid loops.
+    var swSwapTried by remember(url) { mutableStateOf(false) }
+    LaunchedEffect(url) {
+        delay(6_000)
+        if (!swSwapTried && !playbackState.idle && playbackState.position < 0.05) {
+            swSwapTried = true
+            MpvPlayer.forceSoftwareDecode()
+        }
+    }
+
+    // ── Stall watchdog (auto-retry on dead source) ───────────────────
+    // Watches demuxer-cache-time. If it sits at 0 for >15 s while
+    // !paused with a non-zero position, save the spot and reload the
+    // URL. mpv's "keep-open" + our network-timeout would otherwise just
+    // hang. Capped at 3 retries per URL so a truly dead source eventually
+    // gives up instead of looping.
+    var stallRetries by remember(url) { mutableStateOf(0) }
+    var pendingResumeSec by remember(url) { mutableStateOf(0.0) }
+    LaunchedEffect(url) {
+        var stallSince: Long = 0
+        while (true) {
+            delay(2_000)
+            val s = MpvPlayer.state.value
+            if (s.idle || s.paused) { stallSince = 0; continue }
+            if (s.position <= 0.05) { stallSince = 0; continue }
+            if (s.demuxerCacheSeconds > 0.5) {
+                stallSince = 0
+                if (s.streamHealth == StreamHealth.Buffering || s.streamHealth == StreamHealth.Stalled) {
+                    MpvPlayer.clearStreamHealth()
+                }
+                continue
+            }
+            // Cache empty — track how long.
+            val now = System.currentTimeMillis()
+            if (stallSince == 0L) stallSince = now
+            val elapsed = now - stallSince
+            if (elapsed in 3_000..14_999 && s.streamHealth == StreamHealth.Normal) {
+                // Soft state — UI shows "Buffering…"
+                MpvPlayer.state.value.let { /* no-op state read for compiler */ }
+                // Set via the helper — we can't reach into _state here.
+                // Treat Buffering as transient; if it clears we go back
+                // to Normal in the cache>0.5 branch above.
+            }
+            if (elapsed >= 15_000 && stallRetries < 3) {
+                stallRetries += 1
+                pendingResumeSec = s.position
+                android.util.Log.i("PlayerScreen", "Stall recovery #$stallRetries at ${pendingResumeSec}s")
+                MpvPlayer.reloadCurrent()
+                stallSince = 0
+            }
+        }
+    }
+
+    // After a recovery reload, seek back to where we were once playback
+    // ticks past 0 again.
+    LaunchedEffect(playbackState.position, pendingResumeSec) {
+        if (pendingResumeSec > 0 && playbackState.position in 0.01..pendingResumeSec - 0.1) {
+            val target = pendingResumeSec
+            pendingResumeSec = 0.0
+            MpvPlayer.seekTo(target)
+            MpvPlayer.clearStreamHealth()
+        }
+    }
+
     // ── Up Next (autoplay + prefetch) ─────────────────────────────
     // Only fires for serialised content (TV/anime) where we have the
     // tmdbId + season + episode triple to walk forward. For movies and
@@ -365,7 +443,9 @@ fun PlayerScreen(
 
         // Gesture surface — taps toggle chrome, double-tap zones skip ±10s,
         // vertical swipes drive brightness (left) and volume (right).
-        if (!inPip) {
+        // Disabled when locked: the lock overlay below handles taps so
+        // the user can surface an Unlock affordance, but nothing else.
+        if (!inPip && !locked) {
             PlayerGestureSurface(
                 onToggleControls = { controlsVisible = !controlsVisible },
                 onDoubleTapSkip = { delta -> MpvPlayer.seekRelative(delta) },
@@ -381,8 +461,24 @@ fun PlayerScreen(
             LoadingSplash(backdropUrl = backdropUrl, title = title)
         }
 
-        // Apple TV-style controls overlay (hidden in PiP)
-        AnimatedVisibility(visible = controlsVisible && !isLoading && !inPip, enter = fadeIn(), exit = fadeOut()) {
+        // ── Stream-health toast ────────────────────────────────────
+        // Surfaces the auto-retry / SW-fallback work happening behind
+        // the scenes so the user understands a stutter or reload isn't
+        // the app being broken. Hidden when everything is normal.
+        AnimatedVisibility(
+            visible = playbackState.streamHealth != StreamHealth.Normal && !inPip && !isLoading,
+            enter = fadeIn() + androidx.compose.animation.slideInVertically { -it },
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 14.dp),
+        ) {
+            StreamHealthToast(health = playbackState.streamHealth)
+        }
+
+        // Apple TV-style controls overlay (hidden in PiP and when locked)
+        AnimatedVisibility(visible = controlsVisible && !isLoading && !inPip && !locked, enter = fadeIn(), exit = fadeOut()) {
             ControlsOverlay(
                 title = title,
                 state = playbackState,
@@ -394,16 +490,78 @@ fun PlayerScreen(
                 },
                 onTogglePause = { MpvPlayer.togglePause() },
                 onSeekRel = { MpvPlayer.seekRelative(it) },
-                onSeekChange = { v -> isSeeking = true; seekPosition = v },
+                onSeekChange = { v ->
+                    // Live-scrub: snap MPV to the dragged position so the
+                    // main video surface IS the thumbnail preview. Uses
+                    // keyframe-accurate seek for speed; the final
+                    // commit on release uses the precise seek.
+                    isSeeking = true
+                    seekPosition = v
+                    MpvPlayer.scrubTo(v.toDouble())
+                },
                 onSeekFinished = {
                     MpvPlayer.seekTo(seekPosition.toDouble())
                     isSeeking = false
                 },
                 onOpenPicker = { pickerOpen = it },
                 onEnterPip = { enterPip() },
-                onOpenOnlineSubs = { onlineSubsOpen = true },
                 onOpenOptions = { optionsOpen = true },
+                onLock = {
+                    locked = true
+                    controlsVisible = false
+                },
             )
+        }
+
+        // ── Lock overlay ───────────────────────────────────────────
+        // While locked: full-screen tap-catcher swallows every touch so
+        // no gesture / pickup misfire reaches the player. A single tap
+        // briefly surfaces an Unlock pill; the user must tap that pill
+        // to come back out of lock mode.
+        if (locked && !inPip) {
+            val now = System.currentTimeMillis()
+            val showHint = (now - unlockHintAt) < 2_500L
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        detectTapGestures { unlockHintAt = System.currentTimeMillis() }
+                    },
+            ) {
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = showHint,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .statusBarsPadding(),
+                ) {
+                    Surface(
+                        onClick = { locked = false; controlsVisible = true },
+                        shape = CircleShape,
+                        color = Color.White.copy(alpha = 0.18f),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.LockOpen,
+                                contentDescription = "Unlock",
+                                tint = Color.White,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Text(
+                                text = "Tap to unlock",
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         if (optionsOpen) {
@@ -443,21 +601,6 @@ fun PlayerScreen(
                     MpvPlayer.setSubtitleBackdrop(v)
                 },
                 onDismiss = { optionsOpen = false },
-            )
-        }
-
-        // ── Online subtitles sheet — addon-driven ─────────────────────
-        if (onlineSubsOpen) {
-            OnlineSubsSheet(
-                imdbId = imdbId,
-                mediaType = mediaType ?: "movie",
-                season = season,
-                episode = episode,
-                onDismiss = { onlineSubsOpen = false },
-                onPick = { sub ->
-                    MpvPlayer.loadExternalSubtitle(sub.url, sub.label, sub.lang)
-                    onlineSubsOpen = false
-                },
             )
         }
 
@@ -625,8 +768,8 @@ private fun ControlsOverlay(
     onSeekFinished: () -> Unit,
     onOpenPicker: (PickerKind) -> Unit,
     onEnterPip: () -> Unit,
-    onOpenOnlineSubs: () -> Unit,
     onOpenOptions: () -> Unit,
+    onLock: () -> Unit,
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
         // Slim scrims — Apple TV uses minimal darken, just enough for legibility
@@ -685,6 +828,15 @@ private fun ControlsOverlay(
                 }
             }
             Spacer(modifier = Modifier.width(8.dp))
+            GlassIconButton(onClick = onLock, size = 38) {
+                Icon(
+                    imageVector = Icons.Filled.Lock,
+                    contentDescription = "Lock controls",
+                    tint = Color.White,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
             GlassIconButton(onClick = onEnterPip, size = 38) {
                 Icon(Icons.Filled.PictureInPicture, contentDescription = "Picture in picture", tint = Color.White, modifier = Modifier.size(18.dp))
             }
@@ -736,6 +888,28 @@ private fun ControlsOverlay(
                 ) {
                     HdrDisplayChip(state.hdrDisplay)
                     Spacer(Modifier.width(6.dp))
+                    // Verified HDR output — appears only when libmpv has
+                    // confirmed the chain (window→surface→compositor) is
+                    // actually delivering HDR pixels to the panel.
+                    if (state.hdrPipelineActive) {
+                        Surface(
+                            shape = RoundedCornerShape(3.dp),
+                            color = androidx.compose.ui.graphics.Color(0xFFFFB300),
+                        ) {
+                            val luminanceTag = state.targetLuminanceNits
+                                .takeIf { it > 0 }
+                                ?.let { " · ${it.toInt()} NIT" }
+                                .orEmpty()
+                            Text(
+                                text = "HDR ACTIVE$luminanceTag",
+                                color = Color.Black,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(6.dp))
+                    }
                     state.hwdec?.let { CodecChip(it.uppercase()); Spacer(Modifier.width(6.dp)) }
                     state.videoCodec?.takeIf { it.isNotBlank() }?.let { CodecChip(it.uppercase()) }
                 }
@@ -757,18 +931,6 @@ private fun ControlsOverlay(
                 }
                 Spacer(modifier = Modifier.width(8.dp))
                 GlassIconButton(
-                    onClick = onOpenOnlineSubs,
-                    size = 36,
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Download,
-                        contentDescription = "Online subtitles",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-                Spacer(modifier = Modifier.width(8.dp))
-                GlassIconButton(
                     onClick = onOpenOptions,
                     size = 36,
                 ) {
@@ -781,6 +943,70 @@ private fun ControlsOverlay(
                 }
             }
 
+            // Skip pill — surfaces when libmpv's chapter-list says we're
+            // currently in an intro / opening / outro / ending / recap
+            // chapter. Only uses real chapter metadata, never guesses.
+            val skipTarget = remember(position, state.chapters) {
+                classifySkipTarget(position.toDouble(), state.chapters)
+            }
+            androidx.compose.animation.AnimatedVisibility(
+                visible = skipTarget != null,
+                enter = fadeIn() + androidx.compose.animation.slideInHorizontally { it / 2 },
+                exit = fadeOut(),
+                modifier = Modifier.align(Alignment.End).padding(bottom = 10.dp, end = 2.dp),
+            ) {
+                skipTarget?.let { tgt ->
+                    Surface(
+                        onClick = {
+                            val seekTo = tgt.endTime.takeIf { it > 0 } ?: state.duration
+                            if (seekTo > 0) onSeekChange(seekTo.toFloat())
+                            onSeekFinished()
+                        },
+                        shape = RoundedCornerShape(22.dp),
+                        color = Color.White,
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.SkipNext,
+                                contentDescription = null,
+                                tint = Color.Black,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Text(
+                                text = tgt.label,
+                                color = Color.Black,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Buffered-ahead fraction: where the demuxer cache extends to,
+            // expressed as a 0..1 fraction of total duration. Surfaced as
+            // a dimmer fill on the scrubber so the user can see why a
+            // stream stalls (cache hit zero) and how much head-room they
+            // have on a fast connection.
+            val bufferedAheadFraction = remember(state.position, state.demuxerCacheSeconds, state.duration) {
+                if (state.duration > 0) {
+                    ((state.position + state.demuxerCacheSeconds) / state.duration)
+                        .toFloat()
+                        .coerceIn(0f, 1f)
+                } else 0f
+            }
+            // Chapter tick marks — only render when there's more than one
+            // chapter (single-chapter files just have a meaningless tick
+            // at 0).
+            val chapterFractions = remember(state.chapters, state.duration) {
+                if (state.chapters.size <= 1 || state.duration <= 0) emptyList()
+                else state.chapters.drop(1).map { (it.time / state.duration).toFloat().coerceIn(0f, 1f) }
+            }
+
             // Apple TV-style scrubber — fully custom; thin 3dp track
             // centred vertically, 10dp white dot rides the filled edge.
             ApplePillScrubber(
@@ -788,6 +1014,8 @@ private fun ControlsOverlay(
                 valueRange = 0f..duration,
                 onValueChange = onSeekChange,
                 onValueChangeFinished = onSeekFinished,
+                bufferedFraction = bufferedAheadFraction,
+                chapterFractions = chapterFractions,
                 modifier = Modifier.fillMaxWidth(),
             )
 
@@ -827,9 +1055,18 @@ private fun ApplePillScrubber(
     onValueChange: (Float) -> Unit,
     onValueChangeFinished: () -> Unit,
     modifier: Modifier = Modifier,
+    /** 0..1 — how far the demuxer cache extends. Drawn as a dim fill
+     *  past the current position so the user sees how much head-room
+     *  they have on a streaming source. */
+    bufferedFraction: Float = 0f,
+    /** Fractional positions (0..1) of chapter starts. Drawn as small
+     *  tick marks on the scrubber so the user can see where intros /
+     *  outros / acts begin. */
+    chapterFractions: List<Float> = emptyList(),
 ) {
     val span = (valueRange.endInclusive - valueRange.start).coerceAtLeast(0.001f)
     val fraction = ((value - valueRange.start) / span).coerceIn(0f, 1f)
+    val bufferedClamped = bufferedFraction.coerceIn(0f, 1f)
 
     BoxWithConstraints(
         modifier = modifier
@@ -864,12 +1101,37 @@ private fun ApplePillScrubber(
                     RoundedCornerShape(2.dp),
                 ),
         ) {
-            // Filled portion
+            // Buffered ahead — dim fill that runs from the start to the
+            // demuxer cache horizon. Drawn before the played portion so
+            // the bright fill sits on top in the played zone.
+            if (bufferedClamped > 0f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(bufferedClamped)
+                        .background(
+                            Color.White.copy(alpha = 0.45f),
+                            RoundedCornerShape(2.dp),
+                        ),
+                )
+            }
+            // Filled portion (played)
             Box(
                 modifier = Modifier
                     .fillMaxHeight()
                     .fillMaxWidth(fraction)
                     .background(Color.White, RoundedCornerShape(2.dp)),
+            )
+        }
+        // Chapter tick marks — 2 dp wide, 8 dp tall, slightly transparent.
+        chapterFractions.forEach { f ->
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .offset { IntOffset(((widthDp * f) - 1.dp).roundToPx(), 0) }
+                    .width(2.dp)
+                    .height(8.dp)
+                    .background(Color.White.copy(alpha = 0.7f), RoundedCornerShape(1.dp)),
             )
         }
         // Thumb dot — positioned on the leading edge of the fill
@@ -880,6 +1142,80 @@ private fun ApplePillScrubber(
                 .size(10.dp)
                 .background(Color.White, CircleShape),
         )
+    }
+}
+
+/** Result of classifying a chapter the user is currently inside, when
+ *  it matches the intro/outro/recap/preview pattern. */
+private data class SkipTarget(val label: String, val endTime: Double)
+
+/**
+ * Classify the chapter at [positionSec] against libmpv's chapter list.
+ * Returns a [SkipTarget] when the title clearly indicates an intro,
+ * outro, opening, ending, recap, credits, or preview — strictly
+ * keyword-based on the chapter title, never a heuristic.
+ */
+private fun classifySkipTarget(positionSec: Double, chapters: List<MpvChapter>): SkipTarget? {
+    if (chapters.isEmpty()) return null
+    val currentIdx = chapters.indexOfLast { it.time <= positionSec }
+    if (currentIdx < 0) return null
+    val current = chapters[currentIdx]
+    val title = current.title?.trim().orEmpty().lowercase()
+    if (title.isEmpty()) return null
+
+    val label = when {
+        // Anime opening / English "intro" / numbered openings ("op1", "op v2")
+        title == "op" || title.startsWith("op ") || title.startsWith("op:") ||
+            title.contains("opening") || title.contains("intro") -> "Skip Intro"
+        // Anime ending / English "outro" / numbered ED
+        title == "ed" || title.startsWith("ed ") || title.startsWith("ed:") ||
+            title.contains("ending") || title.contains("outro") -> "Skip Outro"
+        title.contains("credit") -> "Skip Credits"
+        title.contains("recap") || title.contains("previously") -> "Skip Recap"
+        title.contains("preview") || title.contains("next time") -> "Skip Preview"
+        else -> return null
+    }
+    val nextTime = chapters.getOrNull(currentIdx + 1)?.time ?: -1.0
+    return SkipTarget(label, nextTime)
+}
+
+/**
+ * Top-center toast surfaced by the stream-health watchdogs. Uses a
+ * neutral pill rather than a banner so it doesn't fight the chrome.
+ * Reconnecting / SoftwareFallback are useful signals; Buffering is too
+ * noisy to surface explicitly (the buffered range on the scrubber
+ * already communicates that).
+ */
+@Composable
+private fun StreamHealthToast(health: StreamHealth) {
+    val (label, accent) = when (health) {
+        StreamHealth.Recovering -> "Reconnecting…" to androidx.compose.ui.graphics.Color(0xFFFFA000)
+        StreamHealth.SoftwareFallback -> "Trying software decoder…" to androidx.compose.ui.graphics.Color(0xFF42A5F5)
+        StreamHealth.Stalled -> "Stream stalled" to androidx.compose.ui.graphics.Color(0xFFEF5350)
+        StreamHealth.Buffering -> "Buffering…" to androidx.compose.ui.graphics.Color(0xFF9E9E9E)
+        StreamHealth.Normal -> return
+    }
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = Color.Black.copy(alpha = 0.78f),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            CircularProgressIndicator(
+                color = accent,
+                strokeWidth = 1.6.dp,
+                modifier = Modifier.size(14.dp),
+            )
+            Text(
+                text = label,
+                color = Color.White,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
     }
 }
 
