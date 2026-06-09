@@ -305,6 +305,28 @@ fun PlayerScreen(
     LaunchedEffect(playerSettings.hardwareDecoding) {
         MpvPlayer.setHardwareDecoding(playerSettings.hardwareDecoding.mpvOption())
     }
+    // Reactive HDR pipeline — flips libplacebo's tone-mapping, gamut
+    // mapping, SDR target peak, and DV handling as the user tweaks them
+    // in Settings. Re-fires applyHdrOptions() so the live render picks
+    // up the new curve without a reload.
+    LaunchedEffect(
+        playerSettings.toneMappingAlgorithm,
+        playerSettings.toneMappingMode,
+        playerSettings.gamutMappingMode,
+        playerSettings.sdrTargetPeakNits,
+        playerSettings.dolbyVisionMode,
+    ) {
+        MpvPlayer.applyHdrConfig(
+            app.cyfer.streaming.android.player.MpvPlayer.HdrPipelineConfig(
+                toneMapping = playerSettings.toneMappingAlgorithm.mpvOption(),
+                toneMappingMode = playerSettings.toneMappingMode.mpvOption(),
+                gamutMappingMode = playerSettings.gamutMappingMode.mpvOption(),
+                sdrTargetPeakNits = playerSettings.sdrTargetPeakNits,
+                dolbyVisionForceHdr10 = playerSettings.dolbyVisionMode ==
+                    app.cyfer.streaming.android.data.settings.DolbyVisionMode.HDR10,
+            ),
+        )
+    }
 
     LaunchedEffect(url) { MpvPlayer.loadUrl(url, title) }
 
@@ -459,6 +481,19 @@ fun PlayerScreen(
             exit = fadeOut(animationSpec = tween(durationMillis = 300)),
         ) {
             LoadingSplash(backdropUrl = backdropUrl, title = title)
+        }
+
+        // ── HDR diagnostic overlay ─────────────────────────────────
+        // Toggled from Settings → Playback → HDR pipeline. Bottom-left,
+        // ignored when chrome is showing so it doesn't overlap controls.
+        if (playerSettings.hdrDiagnosticOverlay && !inPip && !isLoading && !controlsVisible && !locked) {
+            HdrDiagnosticOverlay(
+                state = playbackState,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .navigationBarsPadding()
+                    .padding(start = 14.dp, bottom = 24.dp),
+            )
         }
 
         // ── Stream-health toast ────────────────────────────────────
@@ -825,6 +860,23 @@ private fun ControlsOverlay(
                 if (state.hdrVideo.active) {
                     Spacer(modifier = Modifier.width(8.dp))
                     HdrTitleBadge(state.hdrVideo)
+                    // DV profile chip — only when libplacebo confirmed
+                    // the DV RPU. Tells P7 users "you're getting HDR10".
+                    state.hdrVideo.dolbyVisionProfile?.let { _ ->
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(3.dp),
+                            color = androidx.compose.ui.graphics.Color(0xFF1976D2),
+                        ) {
+                            Text(
+                                text = state.hdrVideo.detailedLabel.uppercase(),
+                                color = Color.White,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                            )
+                        }
+                    }
                 }
             }
             Spacer(modifier = Modifier.width(8.dp))
@@ -1177,6 +1229,59 @@ private fun classifySkipTarget(positionSec: Double, chapters: List<MpvChapter>):
     }
     val nextTime = chapters.getOrNull(currentIdx + 1)?.time ?: -1.0
     return SkipTarget(label, nextTime)
+}
+
+/**
+ * Compact monospace overlay that lists the HDR pipeline state at a
+ * glance — source primaries/transfer/peak, target prim/trc/peak/contrast,
+ * tone-mapping algo, dovi profile, and the all-important
+ * `hdr-display-detected` confirmation. Toggle via Settings → HDR.
+ */
+@Composable
+private fun HdrDiagnosticOverlay(state: MpvPlaybackState, modifier: Modifier = Modifier) {
+    val hdr = state.hdrVideo
+    val display = state.hdrDisplay
+    val rows = buildList {
+        add("DISPLAY    " + display.shortLabel + if (state.hdrPipelineActive) " · ACTIVE" else " · sdr-out")
+        add("PEAK OUT   " + (state.targetLuminanceNits.takeIf { it > 0 }?.let { "${it.toInt()} nit" } ?: "—"))
+        add("SOURCE     " + (hdr.detailedLabel))
+        add("PRIM/TRC   " + listOfNotNull(hdr.primaries, hdr.transfer).joinToString(" / ").ifBlank { "—" })
+        add("SIG PEAK   " + (hdr.signalPeak?.let { "%.1f".format(it) } ?: "—") +
+            "  CLL " + (hdr.maxCll?.toInt()?.toString() ?: "—") +
+            "  FALL " + (hdr.maxFall?.toInt()?.toString() ?: "—"))
+        hdr.dolbyVisionProfile?.let { p ->
+            add("DV         profile=$p" + (hdr.dolbyVisionLevel?.let { " level=$it" } ?: ""))
+        }
+        state.hwdec?.takeIf { it.isNotBlank() }?.let { add("HWDEC      $it") }
+        state.videoCodec?.takeIf { it.isNotBlank() }?.let { add("CODEC      $it") }
+    }
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = Color.Black.copy(alpha = 0.74f),
+        modifier = modifier,
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = "HDR PIPELINE",
+                color = Color.White.copy(alpha = 0.6f),
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.5.sp,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            rows.forEach { line ->
+                Text(
+                    text = line,
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                )
+            }
+        }
+    }
 }
 
 /**

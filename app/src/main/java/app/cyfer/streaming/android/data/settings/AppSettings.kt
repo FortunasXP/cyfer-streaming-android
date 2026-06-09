@@ -69,6 +69,75 @@ fun HardwareDecodingMode.mpvOption(): String = when (this) {
     HardwareDecodingMode.OFF -> "no"
 }
 
+/**
+ * HDR→SDR (and HDR→HDR) tone-mapping algorithm passed to libplacebo via
+ * mpv's `tone-mapping` option.
+ *  - [AUTO]      → "bt.2390" (our default; modern BT-recommended curve)
+ *  - [BT2390]    → "bt.2390"
+ *  - [BT2446A]   → "bt.2446a" (alternative BT-recommended)
+ *  - [HABLE]     → "hable" (filmic; what older mpv defaulted to)
+ *  - [MOBIUS]    → "mobius" (softer rolloff, less highlight detail)
+ *  - [SPLINE]    → "spline" (dynamic, newer)
+ *  - [CLIP]      → "clip" (hard clip — fastest, ugliest)
+ */
+@Serializable
+enum class ToneMappingAlgorithm { AUTO, BT2390, BT2446A, HABLE, MOBIUS, SPLINE, CLIP }
+
+fun ToneMappingAlgorithm.mpvOption(): String = when (this) {
+    ToneMappingAlgorithm.AUTO -> "bt.2390"
+    ToneMappingAlgorithm.BT2390 -> "bt.2390"
+    ToneMappingAlgorithm.BT2446A -> "bt.2446a"
+    ToneMappingAlgorithm.HABLE -> "hable"
+    ToneMappingAlgorithm.MOBIUS -> "mobius"
+    ToneMappingAlgorithm.SPLINE -> "spline"
+    ToneMappingAlgorithm.CLIP -> "clip"
+}
+
+/**
+ * libplacebo `tone-mapping-mode` — how the tone curve is applied across
+ * channels.
+ *  - [HYBRID] → luma + RGB blend (modern best practice, our default)
+ *  - [RGB]    → per-channel
+ *  - [LUMA]   → luminance only (preserves hue but desaturates highlights)
+ *  - [MAX]    → max RGB driver
+ */
+@Serializable
+enum class ToneMappingMode { HYBRID, RGB, LUMA, MAX }
+
+fun ToneMappingMode.mpvOption(): String = when (this) {
+    ToneMappingMode.HYBRID -> "hybrid"
+    ToneMappingMode.RGB -> "rgb"
+    ToneMappingMode.LUMA -> "luma"
+    ToneMappingMode.MAX -> "max"
+}
+
+/** libplacebo `gamut-mapping-mode`. Default = Perceptual hue-preserving. */
+@Serializable
+enum class GamutMappingMode { PERCEPTUAL, RELATIVE, ABSOLUTE, SATURATION, DESATURATE, DARKEN, HIGHLIGHT, LINEAR }
+
+fun GamutMappingMode.mpvOption(): String = when (this) {
+    GamutMappingMode.PERCEPTUAL -> "perceptual"
+    GamutMappingMode.RELATIVE -> "relative"
+    GamutMappingMode.ABSOLUTE -> "absolute"
+    GamutMappingMode.SATURATION -> "saturation"
+    GamutMappingMode.DESATURATE -> "desaturate"
+    GamutMappingMode.DARKEN -> "darken"
+    GamutMappingMode.HIGHLIGHT -> "highlight"
+    GamutMappingMode.LINEAR -> "linear"
+}
+
+/**
+ * How the player handles Dolby Vision metadata.
+ *  - [AUTO]      → libplacebo applies the RPU reshape when DV side data
+ *    is present (the default; profile 5/8 single-layer get full DV).
+ *  - [FORCE_RPU] → same as AUTO today, reserved for future force-on.
+ *  - [HDR10]     → strip DV RPU, render the HDR10 base layer only.
+ *    Useful if the panel does its own DV tone mapping better than the
+ *    libplacebo shader.
+ */
+@Serializable
+enum class DolbyVisionMode { AUTO, FORCE_RPU, HDR10 }
+
 @Serializable
 data class AppSettings(
     /** TMDb v4 read-only bearer token. Empty means fall back to bundled default. */
@@ -125,6 +194,33 @@ data class AppSettings(
      * drops a new episode (next 24 h window, deduped).
      */
     val episodeNotificationsEnabled: Boolean = true,
+
+    // ─── HDR pipeline ───────────────────────────────────────────────
+    // All routed to libplacebo via the mpv `vo=gpu-next` renderer. See
+    // applyHdrOptions() in MpvPlayer.kt. Defaults match the values we
+    // pick programmatically when the user hasn't tweaked anything.
+
+    val toneMappingAlgorithm: ToneMappingAlgorithm = ToneMappingAlgorithm.AUTO,
+    val toneMappingMode: ToneMappingMode = ToneMappingMode.HYBRID,
+    val gamutMappingMode: GamutMappingMode = GamutMappingMode.PERCEPTUAL,
+
+    /**
+     * SDR display target peak in nits. BT.2408 reference is 203; modern
+     * OLED phones can take 400+. Allowed 100..1000 from the UI; clamped
+     * before passing to mpv.
+     */
+    val sdrTargetPeakNits: Int = 203,
+
+    /** Dolby Vision handling — see [DolbyVisionMode]. */
+    val dolbyVisionMode: DolbyVisionMode = DolbyVisionMode.AUTO,
+
+    /**
+     * Show the developer HDR diagnostic overlay on the player. Lists
+     * source primaries/transfer/peak, current target prim/trc/peak,
+     * tone-mapping algo, hdr-display-detected, target-luminance. Helps
+     * confirm the pipeline actually reached the panel.
+     */
+    val hdrDiagnosticOverlay: Boolean = false,
 )
 
 /**

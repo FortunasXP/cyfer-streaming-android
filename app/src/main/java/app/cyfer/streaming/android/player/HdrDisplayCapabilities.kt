@@ -47,6 +47,10 @@ data class HdrVideoMetadata(
     val signalPeak: Double? = null,
     val maxCll: Double? = null,
     val maxFall: Double? = null,
+    /** Dolby Vision profile (5, 7, 8) if reported by libmpv. */
+    val dolbyVisionProfile: Int? = null,
+    /** Dolby Vision compatibility level (1 = HDR10-compat, 4 = HLG-compat). */
+    val dolbyVisionLevel: Int? = null,
 ) {
     private val haystack: String
         get() = listOfNotNull(primaries, transfer, light, colorMatrix)
@@ -59,17 +63,40 @@ data class HdrVideoMetadata(
             haystack.contains("hlg") ||
             haystack.contains("hdr") ||
             haystack.contains("dolby") ||
+            dolbyVisionProfile != null ||
             (signalPeak ?: 0.0) > 1.0 ||
             (maxCll ?: 0.0) > 0.0 ||
             (maxFall ?: 0.0) > 0.0
 
     val label: String
         get() = when {
-            haystack.contains("dolby") -> "Dolby Vision"
+            haystack.contains("dolby") || dolbyVisionProfile != null -> "Dolby Vision"
             haystack.contains("hdr10+") || haystack.contains("hdr10plus") -> "HDR10+"
             haystack.contains("hlg") || haystack.contains("arib-std-b67") -> "HLG"
             active -> "HDR10"
             else -> "SDR"
+        }
+
+    /**
+     * Compact label including the DV profile when known.
+     * Examples: "DV P5", "DV P7→HDR10", "DV P8.1", "HDR10+", "HDR10", "SDR".
+     * P7 is annotated because our libplacebo build can't decode the
+     * dual-layer enhancement layer — we play the HDR10 base layer.
+     */
+    val detailedLabel: String
+        get() {
+            val profile = dolbyVisionProfile
+            if (profile != null) {
+                val level = dolbyVisionLevel
+                val tag = when (profile) {
+                    5 -> "P5"
+                    7 -> "P7→HDR10"
+                    8 -> if (level == 4) "P8.4" else "P8.1"
+                    else -> "P$profile"
+                }
+                return "DV $tag"
+            }
+            return label
         }
 }
 

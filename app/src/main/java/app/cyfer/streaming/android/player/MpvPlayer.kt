@@ -183,19 +183,43 @@ object MpvPlayer : MPV.EventObserver {
         applyHdrOptions(hdrCaps)
     }
 
+    /** User-tunable HDR pipeline config. Defaults match what
+     *  [applyHdrOptions] used to set hard-coded. */
+    data class HdrPipelineConfig(
+        val toneMapping: String = "bt.2390",
+        val toneMappingMode: String = "hybrid",
+        val gamutMappingMode: String = "perceptual",
+        val sdrTargetPeakNits: Int = 203,
+        val dolbyVisionForceHdr10: Boolean = false,
+    )
+
+    @Volatile private var currentHdrConfig: HdrPipelineConfig = HdrPipelineConfig()
+
+    /** Push a fresh HDR config in. Reapplies all libplacebo HDR options. */
+    fun applyHdrConfig(config: HdrPipelineConfig) {
+        currentHdrConfig = config
+        if (initialized) {
+            applyHdrOptions(_state.value.hdrDisplay)
+        }
+    }
+
     private fun applyHdrOptions(hdrCaps: HdrDisplayCapabilities) {
+        val cfg = currentHdrConfig
         // ── HDR pipeline ────────────────────────────────────────────
-        // bt.2390 is the BT-recommended HDR→SDR curve; hybrid mode
-        // (luma+RGB) keeps highlights without crushing saturation; the
-        // 99.995 peak percentile ignores stray specular hot-pixels so
-        // average dark scenes don't get blown out.
+        // hdr-peak-percentile=99.995 ignores stray specular hot-pixels
+        // so an average dark scene doesn't get its tone-curve blown out
+        // by a single bright sub-pixel.
         setOption("hdr-compute-peak", "auto")
         setOption("hdr-peak-percentile", "99.995")
-        setOption("tone-mapping", "bt.2390")
-        setOption("tone-mapping-mode", "hybrid")
-        // perceptual hue-preserving gamut mapping — the modern best
-        // practice for wide-gamut → smaller-gamut output.
-        setOption("gamut-mapping-mode", "perceptual")
+        setOption("tone-mapping", cfg.toneMapping)
+        setOption("tone-mapping-mode", cfg.toneMappingMode)
+        setOption("gamut-mapping-mode", cfg.gamutMappingMode)
+
+        // Dolby Vision handling: when the user picks "HDR10 only", strip
+        // the RPU so libplacebo skips the reshape and renders the base
+        // layer with the standard HDR10 tone curve. Useful on panels
+        // whose own DV processor outperforms libplacebo's shader.
+        setOption("vd-lavc-o", if (cfg.dolbyVisionForceHdr10) "strict=-2,dovi_strip=1" else "")
 
         if (hdrCaps.hdrCapable) {
             setOption("target-colorspace-hint", "yes")
@@ -207,14 +231,13 @@ object MpvPlayer : MPV.EventObserver {
             // can — mpv hints, the OEM tone-mapper finishes.
             setOption("target-contrast", "auto")
         } else {
-            // SDR path: aim for BT.2408 reference (203 nits) instead of
-            // 100. Most modern phone panels exceed this comfortably, so
-            // the previous value crushed HDR highlights when we mapped
-            // down. Display panel will clip anything brighter cleanly.
+            // SDR path: aim for the user-chosen target peak (default 203
+            // = BT.2408 reference). Most modern phone panels exceed 203,
+            // so the historical "100" setting crushed HDR highlights.
             setOption("target-colorspace-hint", "no")
             setOption("target-prim", "bt.709")
             setOption("target-trc", "gamma2.2")
-            setOption("target-peak", "203")
+            setOption("target-peak", cfg.sdrTargetPeakNits.coerceIn(100, 1500).toString())
             setOption("target-contrast", "1000")
         }
     }
@@ -537,6 +560,8 @@ object MpvPlayer : MPV.EventObserver {
 
         val audio = mutableListOf<MpvTrack>()
         val subs = mutableListOf<MpvTrack>()
+        var dvProfile: Int? = null
+        var dvLevel: Int? = null
         for (el in parsed) {
             val obj = el as? JsonObject ?: continue
             val type = (obj["type"] as? JsonPrimitive)?.contentOrNull
@@ -552,9 +577,35 @@ object MpvPlayer : MPV.EventObserver {
             when (type) {
                 "audio" -> audio += track
                 "sub" -> subs += track
+                "video" -> {
+                    // libmpv exposes Dolby Vision metadata on the active
+                    // video track via `dolby-vision-profile` /
+                    // `dolby-vision-level` (added in mpv 0.36+ via the
+                    // libplacebo+ffmpeg integration). Either field can
+                    // be missing for non-DV streams.
+                    val isSelected = (obj["selected"] as? JsonPrimitive)?.booleanOrNull ?: false
+                    if (isSelected) {
+                        dvProfile = (obj["dolby-vision-profile"] as? JsonPrimitive)?.intOrNull
+                            ?: (obj["dv-profile"] as? JsonPrimitive)?.intOrNull
+                        dvLevel = (obj["dolby-vision-level"] as? JsonPrimitive)?.intOrNull
+                            ?: (obj["dv-level"] as? JsonPrimitive)?.intOrNull
+                    }
+                }
             }
         }
-        _state.update { it.copy(audioTracks = audio, subtitleTracks = subs) }
+        _state.update {
+            it.copy(
+                audioTracks = audio,
+                subtitleTracks = subs,
+                hdrVideo = it.hdrVideo.copy(
+                    dolbyVisionProfile = dvProfile ?: it.hdrVideo.dolbyVisionProfile,
+                    dolbyVisionLevel = dvLevel ?: it.hdrVideo.dolbyVisionLevel,
+                ),
+            )
+        }
+        if (dvProfile != null) {
+            Log.i(TAG, "Detected Dolby Vision profile=$dvProfile level=${dvLevel ?: "?"}")
+        }
     }
 
     /**

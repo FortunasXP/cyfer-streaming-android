@@ -127,6 +127,82 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                             onPick = { mode -> mutate { it.copy(hardwareDecoding = mode) } },
                         )
                     }
+                    SettingsSection(title = "HDR pipeline") {
+                        Text(
+                            text = "Cyfer's libmpv ships libdovi + libplacebo. Defaults match BT.2408 reference and look great on most phones — tweak if a specific title doesn't.",
+                            color = CyferTextSecondary,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        EnumPickerRow(
+                            label = "Tone mapping algorithm",
+                            description = "How HDR luminance maps to your display's range. BT.2390 is the modern broadcast standard.",
+                            options = listOf(
+                                app.cyfer.streaming.android.data.settings.ToneMappingAlgorithm.AUTO to "Auto (BT.2390)",
+                                app.cyfer.streaming.android.data.settings.ToneMappingAlgorithm.BT2390 to "BT.2390",
+                                app.cyfer.streaming.android.data.settings.ToneMappingAlgorithm.BT2446A to "BT.2446A",
+                                app.cyfer.streaming.android.data.settings.ToneMappingAlgorithm.HABLE to "Hable (filmic)",
+                                app.cyfer.streaming.android.data.settings.ToneMappingAlgorithm.MOBIUS to "Mobius",
+                                app.cyfer.streaming.android.data.settings.ToneMappingAlgorithm.SPLINE to "Spline",
+                                app.cyfer.streaming.android.data.settings.ToneMappingAlgorithm.CLIP to "Clip (hard)",
+                            ),
+                            current = settings.toneMappingAlgorithm,
+                            onPick = { v -> mutate { it.copy(toneMappingAlgorithm = v) } },
+                        )
+                        EnumPickerRow(
+                            label = "Tone mapping mode",
+                            description = "Whether the tone curve is applied per-channel (RGB), luminance-only, or both (Hybrid).",
+                            options = listOf(
+                                app.cyfer.streaming.android.data.settings.ToneMappingMode.HYBRID to "Hybrid (recommended)",
+                                app.cyfer.streaming.android.data.settings.ToneMappingMode.RGB to "RGB",
+                                app.cyfer.streaming.android.data.settings.ToneMappingMode.LUMA to "Luma",
+                                app.cyfer.streaming.android.data.settings.ToneMappingMode.MAX to "Max",
+                            ),
+                            current = settings.toneMappingMode,
+                            onPick = { v -> mutate { it.copy(toneMappingMode = v) } },
+                        )
+                        EnumPickerRow(
+                            label = "Gamut mapping",
+                            description = "How wide-gamut HDR colour fits into the panel's smaller colour space. Perceptual preserves hue.",
+                            options = listOf(
+                                app.cyfer.streaming.android.data.settings.GamutMappingMode.PERCEPTUAL to "Perceptual (recommended)",
+                                app.cyfer.streaming.android.data.settings.GamutMappingMode.RELATIVE to "Relative",
+                                app.cyfer.streaming.android.data.settings.GamutMappingMode.SATURATION to "Saturation",
+                                app.cyfer.streaming.android.data.settings.GamutMappingMode.DESATURATE to "Desaturate",
+                                app.cyfer.streaming.android.data.settings.GamutMappingMode.DARKEN to "Darken",
+                                app.cyfer.streaming.android.data.settings.GamutMappingMode.HIGHLIGHT to "Highlight (debug)",
+                                app.cyfer.streaming.android.data.settings.GamutMappingMode.ABSOLUTE to "Absolute",
+                                app.cyfer.streaming.android.data.settings.GamutMappingMode.LINEAR to "Linear",
+                            ),
+                            current = settings.gamutMappingMode,
+                            onPick = { v -> mutate { it.copy(gamutMappingMode = v) } },
+                        )
+                        IntSliderRow(
+                            label = "SDR target peak",
+                            description = "Nits the SDR display can hit. BT.2408 reference = 203. Modern OLEDs can take 400–600.",
+                            range = 100..1000,
+                            step = 25,
+                            current = settings.sdrTargetPeakNits,
+                            valueLabel = { "$it nits" },
+                            onChange = { v -> mutate { it.copy(sdrTargetPeakNits = v) } },
+                        )
+                        EnumPickerRow(
+                            label = "Dolby Vision",
+                            description = "Auto applies the libdovi RPU reshape (profile 5 / 8). HDR10 strips DV metadata and renders the base layer — useful if your panel's own DV processor is better than libplacebo's shader.",
+                            options = listOf(
+                                app.cyfer.streaming.android.data.settings.DolbyVisionMode.AUTO to "Auto (recommended)",
+                                app.cyfer.streaming.android.data.settings.DolbyVisionMode.FORCE_RPU to "Force RPU reshape",
+                                app.cyfer.streaming.android.data.settings.DolbyVisionMode.HDR10 to "Strip DV → HDR10",
+                            ),
+                            current = settings.dolbyVisionMode,
+                            onPick = { v -> mutate { it.copy(dolbyVisionMode = v) } },
+                        )
+                        ToggleRow(
+                            label = "HDR diagnostic overlay",
+                            description = "Show a small panel on the player listing source primaries, target peak, tone-mapping algo, and whether the display reported HDR back. For chasing OEM weirdness.",
+                            checked = settings.hdrDiagnosticOverlay,
+                            onCheckedChange = { v -> mutate { it.copy(hdrDiagnosticOverlay = v) } },
+                        )
+                    }
                     SettingsSection(title = "Local torrent fallback") {
                         ToggleRow(
                             label = "Use on-device torrent engine",
@@ -579,6 +655,117 @@ private fun ToggleRow(
                 uncheckedThumbColor = CyferTextTertiary,
                 uncheckedTrackColor = CyferCardSurface,
                 uncheckedBorderColor = CyferCardSurfaceLight,
+            ),
+        )
+    }
+}
+
+/**
+ * Single-row picker for an enum-backed setting. Compact dropdown-style
+ * surface that expands into a column of choices on tap. Matches the
+ * Hardware Decoding pattern but without the per-option descriptions
+ * (the parent row's `description` covers that).
+ */
+@Composable
+private fun <T : Enum<T>> EnumPickerRow(
+    label: String,
+    description: String?,
+    options: List<Pair<T, String>>,
+    current: T,
+    onPick: (T) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val currentLabel = options.firstOrNull { it.first == current }?.second ?: current.name
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Surface(
+            onClick = { expanded = !expanded },
+            shape = RoundedCornerShape(12.dp),
+            color = CyferCardSurface,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(label, color = CyferWhite, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                    if (!description.isNullOrBlank()) {
+                        Text(description, color = CyferTextSecondary, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                Text(currentLabel, color = CyferAccent, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        if (expanded) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                options.forEach { (value, optLabel) ->
+                    val selected = value == current
+                    Surface(
+                        onClick = { onPick(value); expanded = false },
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (selected) CyferCardSurfaceLight else CyferCardSurface,
+                        border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, CyferAccent) else null,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(
+                                selected = selected,
+                                onClick = { onPick(value); expanded = false },
+                                colors = RadioButtonDefaults.colors(
+                                    selectedColor = CyferAccent,
+                                    unselectedColor = CyferTextTertiary,
+                                ),
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(optLabel, color = CyferWhite, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Integer slider with discrete steps + label + description + live
+ * value readout. Used for SDR target peak (100..1000 nits, 25 step).
+ */
+@Composable
+private fun IntSliderRow(
+    label: String,
+    description: String?,
+    range: IntRange,
+    step: Int,
+    current: Int,
+    valueLabel: (Int) -> String,
+    onChange: (Int) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(label, color = CyferWhite, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                if (!description.isNullOrBlank()) {
+                    Text(description, color = CyferTextSecondary, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            Text(valueLabel(current), color = CyferAccent, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+        }
+        val steps = ((range.last - range.first) / step) - 1
+        Slider(
+            value = current.toFloat(),
+            onValueChange = { v ->
+                val snapped = (v / step).toInt() * step
+                onChange(snapped.coerceIn(range.first, range.last))
+            },
+            valueRange = range.first.toFloat()..range.last.toFloat(),
+            steps = steps.coerceAtLeast(0),
+            colors = SliderDefaults.colors(
+                thumbColor = CyferAccent,
+                activeTrackColor = CyferAccent,
+                inactiveTrackColor = CyferCardSurfaceLight,
             ),
         )
     }
