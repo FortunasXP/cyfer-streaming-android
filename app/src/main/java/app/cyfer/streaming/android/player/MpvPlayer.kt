@@ -43,11 +43,12 @@ data class MpvChapter(
  * "Reconnecting…" / "Trying software decoder…" toast overlays.
  */
 enum class StreamHealth {
-    Normal,            // Playing smoothly, cache full
-    Buffering,         // Cache draining but not yet stalled
-    Stalled,           // Cache at 0 for too long — recovery imminent
-    Recovering,        // Reload in flight
-    SoftwareFallback,  // HW decoder failed to produce frames; swapping to SW
+    Normal,                 // Playing smoothly, cache full
+    Buffering,              // Cache draining but not yet stalled
+    Stalled,                // Cache at 0 for too long — recovery imminent
+    Recovering,             // Reload in flight
+    HardwareCopyFallback,   // mediacodec failed; trying mediacodec-copy
+    SoftwareFallback,       // both HW modes failed; last-resort SW decode
 }
 
 data class MpvPlaybackState(
@@ -330,14 +331,36 @@ object MpvPlayer : MPV.EventObserver {
     }
 
     /**
-     * Force the software decoder. Used by the first-frame watchdog when
-     * the HW decoder accepted the stream but produced no output (common
-     * on HEVC Main 10 + AV1 on older chipsets). Surfaces via UI as
-     * "Trying software decoder…".
+     * Try the copy-mode HW decoder before giving up on hardware entirely.
+     * `mediacodec-copy` reads frames from MediaCodec into system memory
+     * instead of relying on the zero-copy surface path. Slightly higher
+     * CPU but handles DV-marked HEVC + some quirky AV1 streams that
+     * choke the zero-copy `mediacodec` mode.
+     * Used by the first-frame watchdog as the intermediate fallback —
+     * we go HW → mediacodec-copy → SW, with SW reserved for true
+     * last-resort because a 2018 phone software-decoding 4K HEVC is
+     * effectively unplayable.
+     */
+    fun switchToMediacodecCopy() {
+        if (!initialized) return
+        if (currentHwdec == "mediacodec-copy") return
+        Log.i(TAG, "Switching to mediacodec-copy as intermediate fallback")
+        currentHwdec = "mediacodec-copy"
+        setOption("hwdec", "mediacodec-copy")
+        _state.update { it.copy(streamHealth = StreamHealth.HardwareCopyFallback) }
+        currentUrl?.let { mpv.command("loadfile", it) }
+    }
+
+    /**
+     * Force the software decoder. Used by the first-frame watchdog ONLY
+     * as a last-last resort, after both `mediacodec` and `mediacodec-copy`
+     * failed to produce a frame. On older SoCs software HEVC at 4K is
+     * essentially unplayable, so we burn 24 s of timeout budget before
+     * resorting to this.
      */
     fun forceSoftwareDecode() {
         if (!initialized) return
-        Log.i(TAG, "Forcing software decoder")
+        Log.i(TAG, "Forcing software decoder (last resort)")
         currentHwdec = "no"
         setOption("hwdec", "no")
         _state.update { it.copy(streamHealth = StreamHealth.SoftwareFallback) }

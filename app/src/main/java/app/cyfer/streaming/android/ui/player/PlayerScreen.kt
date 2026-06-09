@@ -334,15 +334,31 @@ fun PlayerScreen(
 
     LaunchedEffect(url) { MpvPlayer.loadUrl(url, title) }
 
-    // ── First-frame watchdog (HW → SW fallback) ──────────────────────
+    // ── First-frame watchdog (HW → HW-copy → SW cascade) ────────────
     // The static vd-lavc-software-fallback=1 mpv flag only catches hard
     // decoder errors. Some chipsets accept the stream then silently
-    // produce no frames on HEVC Main 10 / AV1. Detect by checking
-    // position is still 0 six seconds after loadfile; if so, force SW
-    // and reload. Only fires once per URL to avoid loops.
+    // produce no frames on DV-tagged HEVC / 4K AV1.
+    //
+    // Cascade:
+    //   t = 0    loadfile with the user's chosen hwdec (usually mediacodec)
+    //   t = 12s  if position still 0 → switch to mediacodec-copy + reload
+    //   t = 24s  if position still 0 → fall back to software (`no`) + reload
+    //
+    // SW HEVC at 4K is unplayable on most 2018-era phones, so we burn
+    // the full 24 s of timeout budget keeping HW alive before that
+    // last-resort step.
+    var copySwapTried by remember(url) { mutableStateOf(false) }
     var swSwapTried by remember(url) { mutableStateOf(false) }
     LaunchedEffect(url) {
-        delay(6_000)
+        delay(12_000)
+        if (!copySwapTried && !playbackState.idle && playbackState.position < 0.05) {
+            copySwapTried = true
+            MpvPlayer.switchToMediacodecCopy()
+        }
+    }
+    LaunchedEffect(url, copySwapTried) {
+        if (!copySwapTried) return@LaunchedEffect
+        delay(12_000)
         if (!swSwapTried && !playbackState.idle && playbackState.position < 0.05) {
             swSwapTried = true
             MpvPlayer.forceSoftwareDecode()
@@ -1309,6 +1325,7 @@ private fun HdrDiagnosticOverlay(state: MpvPlaybackState, modifier: Modifier = M
 private fun StreamHealthToast(health: StreamHealth) {
     val (label, accent) = when (health) {
         StreamHealth.Recovering -> "Reconnecting…" to androidx.compose.ui.graphics.Color(0xFFFFA000)
+        StreamHealth.HardwareCopyFallback -> "Switching decoder mode…" to androidx.compose.ui.graphics.Color(0xFF26C6DA)
         StreamHealth.SoftwareFallback -> "Trying software decoder…" to androidx.compose.ui.graphics.Color(0xFF42A5F5)
         StreamHealth.Stalled -> "Stream stalled" to androidx.compose.ui.graphics.Color(0xFFEF5350)
         StreamHealth.Buffering -> "Buffering…" to androidx.compose.ui.graphics.Color(0xFF9E9E9E)
