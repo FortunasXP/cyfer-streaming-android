@@ -216,6 +216,90 @@ class TraktRepository(private val context: Context) {
 
     enum class ScrobbleAction(val token: String) { Start("start"), Pause("pause"), Stop("stop") }
 
+    // ─────────────────────────── History (mark watched) ───────────────────────────
+
+    /**
+     * Push a manual "mark watched" to Trakt's history.
+     *
+     *   POST /sync/history   — adds a watched event dated [watchedAtIso]
+     *
+     * Movies identify by IMDb id; episodes by show IMDb id + season/ep.
+     * Swallows errors — a Trakt failure must never block the local mark.
+     */
+    suspend fun markWatched(
+        imdbId: String,
+        mediaType: String,         // "movie" | "tv"
+        season: Int? = null,
+        episode: Int? = null,
+        watchedAtIso: String = nowIso(),
+    ) = withContext(Dispatchers.IO) {
+        val s = session.first()
+        if (!s.isConnected || imdbId.isBlank()) return@withContext
+        val body = if (mediaType == "movie") {
+            """{"movies":[{"ids":{"imdb":"$imdbId"},"watched_at":"$watchedAtIso"}]}"""
+        } else {
+            """{"shows":[{"ids":{"imdb":"$imdbId"},"seasons":[{"number":${season ?: 1},"episodes":[{"number":${episode ?: 1},"watched_at":"$watchedAtIso"}]}]}]}"""
+        }.toRequestBody(JSON_MEDIA)
+        postTrakt("/sync/history", body, s.accessToken, "markWatched")
+    }
+
+    /**
+     * Remove a watched event from Trakt history.
+     *
+     *   POST /sync/history/remove
+     */
+    suspend fun removeWatched(
+        imdbId: String,
+        mediaType: String,
+        season: Int? = null,
+        episode: Int? = null,
+    ) = withContext(Dispatchers.IO) {
+        val s = session.first()
+        if (!s.isConnected || imdbId.isBlank()) return@withContext
+        val body = if (mediaType == "movie") {
+            """{"movies":[{"ids":{"imdb":"$imdbId"}}]}"""
+        } else {
+            """{"shows":[{"ids":{"imdb":"$imdbId"},"seasons":[{"number":${season ?: 1},"episodes":[{"number":${episode ?: 1}}]}]}]}"""
+        }.toRequestBody(JSON_MEDIA)
+        postTrakt("/sync/history/remove", body, s.accessToken, "removeWatched")
+    }
+
+    /** Mark a whole season watched in one request. */
+    suspend fun markSeasonWatched(
+        imdbId: String,
+        season: Int,
+        episodeNumbers: List<Int>,
+        watchedAtIso: String = nowIso(),
+    ) = withContext(Dispatchers.IO) {
+        val s = session.first()
+        if (!s.isConnected || imdbId.isBlank() || episodeNumbers.isEmpty()) return@withContext
+        val eps = episodeNumbers.joinToString(",") { """{"number":$it,"watched_at":"$watchedAtIso"}""" }
+        val body = """{"shows":[{"ids":{"imdb":"$imdbId"},"seasons":[{"number":$season,"episodes":[$eps]}]}]}"""
+            .toRequestBody(JSON_MEDIA)
+        postTrakt("/sync/history", body, s.accessToken, "markSeasonWatched")
+    }
+
+    private fun postTrakt(
+        path: String,
+        body: okhttp3.RequestBody,
+        accessToken: String,
+        tag: String,
+    ) {
+        val req = Request.Builder()
+            .url("${TraktConfig.API_BASE}$path")
+            .post(body)
+            .header("Authorization", "Bearer $accessToken")
+            .header("trakt-api-version", "2")
+            .header("trakt-api-key", TraktConfig.CLIENT_ID)
+            .header("User-Agent", TraktConfig.USER_AGENT)
+            .build()
+        runCatching { client.newCall(req).execute().use { /* swallow body */ } }
+            .onFailure { Log.w(TAG, "$tag failed: ${it.message}") }
+    }
+
+    private fun nowIso(): String =
+        java.time.format.DateTimeFormatter.ISO_INSTANT.format(java.time.Instant.now())
+
     suspend fun importWatchlist(): TraktSyncResult = withContext(Dispatchers.IO) {
         val s = session.first()
         if (!s.isConnected) return@withContext TraktSyncResult(false, error = "Not connected to Trakt")

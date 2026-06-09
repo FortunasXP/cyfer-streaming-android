@@ -131,6 +131,83 @@ class LibraryRepository(private val context: Context) {
         }
     }
 
+    // ── Mark watched / unwatched ────────────────────────────────────
+    //
+    // "Watched" is modelled as a progress entry whose position == its
+    // duration, so [ProgressEntry.watched] (the 85% rule) reports true.
+    // We synthesise a duration if the real runtime isn't known yet —
+    // any positive value works because position == duration => 100%.
+
+    /**
+     * Force a title/episode to "watched" by writing a full-duration
+     * progress entry. [knownDurationSeconds] should be the real runtime
+     * when available (so the Continue/History UIs show a sensible total),
+     * otherwise a 1-second placeholder is used.
+     */
+    suspend fun markWatched(
+        tmdbId: Int,
+        mediaType: String,
+        title: String,
+        posterUrl: String? = null,
+        backdropUrl: String? = null,
+        season: Int? = null,
+        episode: Int? = null,
+        seriesTmdbId: Int? = null,
+        seriesTitle: String? = null,
+        knownDurationSeconds: Double? = null,
+    ) {
+        val duration = (knownDurationSeconds ?: 1.0).coerceAtLeast(1.0)
+        val entry = ProgressEntry(
+            tmdbId = tmdbId,
+            mediaType = mediaType,
+            title = title,
+            posterUrl = posterUrl,
+            backdropUrl = backdropUrl,
+            season = season,
+            episode = episode,
+            seriesTmdbId = seriesTmdbId,
+            seriesTitle = seriesTitle,
+            position = duration,
+            duration = duration,
+            updatedAt = System.currentTimeMillis(),
+        )
+        update { current ->
+            val without = current.progress.filterNot { it.key == entry.key }
+            current.copy(progress = listOf(entry) + without)
+        }
+    }
+
+    /** Clear the watched/in-progress state for a title or episode. */
+    suspend fun markUnwatched(
+        tmdbId: Int,
+        mediaType: String,
+        season: Int? = null,
+        episode: Int? = null,
+    ) = removeProgress(tmdbId, mediaType, season, episode)
+
+    /**
+     * Mark a batch of episodes watched in a single atomic write — used
+     * by "Mark season watched". Far cheaper than N separate edits.
+     */
+    suspend fun markEpisodesWatched(entries: List<ProgressEntry>) {
+        if (entries.isEmpty()) return
+        val stamped = entries.map { it.copy(updatedAt = System.currentTimeMillis()) }
+        val keys = stamped.map { it.key }.toSet()
+        update { current ->
+            val without = current.progress.filterNot { it.key in keys }
+            current.copy(progress = stamped + without)
+        }
+    }
+
+    /** Clear watched state for a batch of episode keys (whole season). */
+    suspend fun markEpisodesUnwatched(keys: Collection<String>) {
+        if (keys.isEmpty()) return
+        val keySet = keys.toSet()
+        update { current ->
+            current.copy(progress = current.progress.filterNot { it.key in keySet })
+        }
+    }
+
     companion object {
         @Volatile private var instance: LibraryRepository? = null
 

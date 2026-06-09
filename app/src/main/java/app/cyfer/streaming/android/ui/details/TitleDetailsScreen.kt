@@ -18,6 +18,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.RemoveRedEye
+import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -122,7 +124,17 @@ fun TitleDetailsScreen(
             .filter { it.tmdbId == item.id && it.mediaType == mediaType && !it.watched && it.position > 0.0 }
             .maxByOrNull { it.updatedAt }
     }
+    // Movie-level watched flag — drives the "Mark watched" toggle. For
+    // series the watched state is tracked per-episode instead.
+    val titleWatched = remember(progress, item.id, mediaType) {
+        progress.any {
+            it.tmdbId == item.id && it.mediaType == mediaType &&
+                it.season == null && it.episode == null && it.watched
+        }
+    }
     val libraryScope = rememberCoroutineScope()
+    // Trakt push on manual marks — fire-and-forget when connected.
+    val traktRepo = remember { app.cyfer.streaming.android.data.trakt.TraktRepository.get(context) }
     val sourceSearch = rememberSourceSearch(pickerRequest)
 
     Column(
@@ -336,37 +348,73 @@ fun TitleDetailsScreen(
                 .padding(horizontal = 20.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Button(
-                onClick = {
-                    onRequestSources(
-                        SourcePickerRequest(
-                            title = item.displayTitle,
-                            year = item.displayYear.takeIf { it.isNotEmpty() },
-                            mediaType = if (mediaType == "tv") TorrentMediaType.tv else TorrentMediaType.movie,
-                            season = resumeEntry?.season,
-                            episode = resumeEntry?.episode,
-                            imdbId = item.stremioId,
-                            backdropUrl = item.backdropUrl ?: item.posterUrl,
-                            tmdbId = item.id,
-                            posterUrl = item.posterUrl,
-                        ),
-                    )
-                },
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = CyferWhite,
-                    contentColor = CyferBlack,
-                ),
-                shape = RoundedCornerShape(22.dp),
-                contentPadding = PaddingValues(horizontal = 22.dp, vertical = 0.dp),
-                modifier = Modifier.height(42.dp),
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                Icon(Icons.Default.PlayArrow, null, modifier = Modifier.size(18.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = buildPlayLabel(resumeEntry, isEpisodic),
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                )
+                Button(
+                    onClick = {
+                        onRequestSources(
+                            SourcePickerRequest(
+                                title = item.displayTitle,
+                                year = item.displayYear.takeIf { it.isNotEmpty() },
+                                mediaType = if (mediaType == "tv") TorrentMediaType.tv else TorrentMediaType.movie,
+                                season = resumeEntry?.season,
+                                episode = resumeEntry?.episode,
+                                imdbId = item.stremioId,
+                                backdropUrl = item.backdropUrl ?: item.posterUrl,
+                                tmdbId = item.id,
+                                posterUrl = item.posterUrl,
+                            ),
+                        )
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CyferWhite,
+                        contentColor = CyferBlack,
+                    ),
+                    shape = RoundedCornerShape(22.dp),
+                    contentPadding = PaddingValues(horizontal = 22.dp, vertical = 0.dp),
+                    modifier = Modifier.height(42.dp),
+                ) {
+                    Icon(Icons.Default.PlayArrow, null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = buildPlayLabel(resumeEntry, isEpisodic),
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+
+                // Mark watched / unwatched — movies only. (Series track
+                // watched state per-episode in the Episodes section.)
+                if (isMovie) {
+                    val runtimeSec = (item.runtime ?: 0) * 60.0
+                    MarkWatchedButton(
+                        watched = titleWatched,
+                        onToggle = {
+                            libraryScope.launch {
+                                if (titleWatched) {
+                                    libraryRepo.markUnwatched(item.id, mediaType)
+                                    item.stremioId?.let {
+                                        traktRepo.removeWatched(it, mediaType)
+                                    }
+                                } else {
+                                    libraryRepo.markWatched(
+                                        tmdbId = item.id,
+                                        mediaType = mediaType,
+                                        title = item.displayTitle,
+                                        posterUrl = item.posterUrl,
+                                        backdropUrl = item.backdropUrl,
+                                        knownDurationSeconds = runtimeSec.takeIf { it > 0 },
+                                    )
+                                    item.stremioId?.let {
+                                        traktRepo.markWatched(it, mediaType)
+                                    }
+                                }
+                            }
+                        },
+                    )
+                }
             }
         }
 
@@ -487,7 +535,86 @@ fun TitleDetailsScreen(
                 }
             }
 
-            SectionLabel("Episodes")
+            // Episodes header with a "Mark season watched" action on the
+            // right. Computes the season-watched state from the loaded
+            // episode list + saved progress.
+            val seasonAllWatched = remember(progress, item.id, selectedSeason, episodes) {
+                episodes.isNotEmpty() && episodes.all { ep ->
+                    progress.any {
+                        it.tmdbId == item.id && it.mediaType == "tv" &&
+                            it.season == ep.season_number && it.episode == ep.episode_number && it.watched
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(end = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SectionLabel("Episodes", modifier = Modifier.weight(1f))
+                if (episodes.isNotEmpty()) {
+                    Surface(
+                        onClick = {
+                            libraryScope.launch {
+                                if (seasonAllWatched) {
+                                    val keys = episodes.map { ep ->
+                                        app.cyfer.streaming.android.data.library.ProgressEntry(
+                                            tmdbId = item.id, mediaType = "tv", title = "",
+                                            season = ep.season_number, episode = ep.episode_number,
+                                            position = 0.0, duration = 0.0, updatedAt = 0,
+                                        ).key
+                                    }
+                                    libraryRepo.markEpisodesUnwatched(keys)
+                                    item.stremioId?.let { imdb ->
+                                        episodes.forEach { ep ->
+                                            traktRepo.removeWatched(imdb, "tv", ep.season_number, ep.episode_number)
+                                        }
+                                    }
+                                } else {
+                                    val entries = episodes.map { ep ->
+                                        val dur = ((ep.runtime ?: item.episode_run_time?.firstOrNull() ?: 1) * 60.0).coerceAtLeast(1.0)
+                                        app.cyfer.streaming.android.data.library.ProgressEntry(
+                                            tmdbId = item.id, mediaType = "tv",
+                                            title = "${item.displayTitle} — S${ep.season_number}E${ep.episode_number}",
+                                            posterUrl = ep.stillUrl ?: item.posterUrl,
+                                            backdropUrl = item.backdropUrl,
+                                            season = ep.season_number, episode = ep.episode_number,
+                                            seriesTmdbId = item.id, seriesTitle = item.displayTitle,
+                                            position = dur, duration = dur, updatedAt = System.currentTimeMillis(),
+                                        )
+                                    }
+                                    libraryRepo.markEpisodesWatched(entries)
+                                    item.stremioId?.let { imdb ->
+                                        traktRepo.markSeasonWatched(
+                                            imdb, selectedSeason, episodes.map { it.episode_number },
+                                        )
+                                    }
+                                }
+                            }
+                        },
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (seasonAllWatched) CyferAccent.copy(alpha = 0.18f) else Color.Transparent,
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Icon(
+                                imageVector = if (seasonAllWatched) Icons.Default.Replay else Icons.Default.Check,
+                                contentDescription = null,
+                                tint = CyferAccent,
+                                modifier = Modifier.size(14.dp),
+                            )
+                            Text(
+                                text = if (seasonAllWatched) "Unwatch season" else "Mark season",
+                                color = CyferAccent,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
+                }
+            }
             Spacer(modifier = Modifier.height(12.dp))
 
             // Season pill row — scrollable so 20+ season shows still fit.
@@ -553,6 +680,33 @@ fun TitleDetailsScreen(
                                     ),
                                 )
                             },
+                            onToggleWatched = {
+                                libraryScope.launch {
+                                    if (epProgress?.watched == true) {
+                                        libraryRepo.markUnwatched(item.id, "tv", ep.season_number, ep.episode_number)
+                                        item.stremioId?.let {
+                                            traktRepo.removeWatched(it, "tv", ep.season_number, ep.episode_number)
+                                        }
+                                    } else {
+                                        val dur = ((ep.runtime ?: item.episode_run_time?.firstOrNull() ?: 1) * 60.0).coerceAtLeast(1.0)
+                                        libraryRepo.markWatched(
+                                            tmdbId = item.id,
+                                            mediaType = "tv",
+                                            title = "${item.displayTitle} — S${ep.season_number}E${ep.episode_number}",
+                                            posterUrl = ep.stillUrl ?: item.posterUrl,
+                                            backdropUrl = item.backdropUrl,
+                                            season = ep.season_number,
+                                            episode = ep.episode_number,
+                                            seriesTmdbId = item.id,
+                                            seriesTitle = item.displayTitle,
+                                            knownDurationSeconds = dur,
+                                        )
+                                        item.stremioId?.let {
+                                            traktRepo.markWatched(it, "tv", ep.season_number, ep.episode_number)
+                                        }
+                                    }
+                                }
+                            },
                         )
                     }
                 }
@@ -610,6 +764,40 @@ fun TitleDetailsScreen(
         }
 
         Spacer(modifier = Modifier.height(100.dp))
+    }
+}
+
+/**
+ * Pill toggle for "Mark watched" / "Watched". Filled accent when the
+ * title is watched, outlined otherwise. Sits beside the Play button.
+ */
+@Composable
+private fun MarkWatchedButton(watched: Boolean, onToggle: () -> Unit) {
+    Surface(
+        onClick = onToggle,
+        shape = RoundedCornerShape(22.dp),
+        color = if (watched) CyferAccent else CyferCardSurface,
+        border = if (watched) null else BorderStroke(1.dp, CyferCardSurfaceLight),
+        modifier = Modifier.height(42.dp),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 18.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(
+                imageVector = if (watched) Icons.Default.Check else Icons.Default.RemoveRedEye,
+                contentDescription = null,
+                tint = if (watched) CyferBlack else CyferWhite,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                text = if (watched) "Watched" else "Mark watched",
+                color = if (watched) CyferBlack else CyferWhite,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+            )
+        }
     }
 }
 
@@ -724,7 +912,9 @@ private fun EpisodeRow(
     episode: app.cyfer.streaming.android.data.tmdb.TmdbEpisode,
     progress: app.cyfer.streaming.android.data.library.ProgressEntry?,
     onPlay: () -> Unit,
+    onToggleWatched: () -> Unit = {},
 ) {
+    val isWatched = progress?.watched == true
     Surface(
         onClick = onPlay,
         shape = RoundedCornerShape(12.dp),
@@ -748,15 +938,16 @@ private fun EpisodeRow(
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
-                    // Big play glyph centered, dim until tapped
+                    // Watched stills get a dimmer scrim + corner check so
+                    // the user can scan a season at a glance.
                     Box(
                         modifier = Modifier
                             .matchParentSize()
-                            .background(Color.Black.copy(alpha = 0.35f)),
+                            .background(Color.Black.copy(alpha = if (isWatched) 0.6f else 0.35f)),
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(
-                            imageVector = Icons.Filled.PlayArrow,
+                            imageVector = if (isWatched) Icons.Filled.Check else Icons.Filled.PlayArrow,
                             contentDescription = null,
                             tint = CyferWhite,
                             modifier = Modifier.size(28.dp),
@@ -793,12 +984,31 @@ private fun EpisodeRow(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = episode.displayTitle,
-                            color = CyferWhite,
+                            color = if (isWatched) CyferTextSecondary else CyferWhite,
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
                         )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        // Per-episode watched toggle. Stops the row's
+                        // onClick (play) from firing via its own surface.
+                        Surface(
+                            onClick = onToggleWatched,
+                            shape = CircleShape,
+                            color = if (isWatched) CyferAccent else CyferCardSurface,
+                            modifier = Modifier.size(26.dp),
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Filled.Check,
+                                    contentDescription = if (isWatched) "Mark unwatched" else "Mark watched",
+                                    tint = if (isWatched) CyferBlack else CyferTextTertiary,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                            }
+                        }
                     }
                     val metaParts = buildList {
                         episode.runtimeFormatted.takeIf { it.isNotEmpty() }?.let { add(it) }

@@ -10,6 +10,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -49,6 +52,7 @@ fun ContinueWatchingScreen(
     val library = remember { LibraryRepository.get(ctx) }
     val progress by library.progress.collectAsStateWithLifecycle(initialValue = emptyList())
 
+    val scope = rememberCoroutineScope()
     var tab by remember { mutableStateOf(LibraryTab.Continue) }
     val sorted = remember(progress) { progress.sortedByDescending { it.updatedAt } }
     val filtered = remember(sorted, tab) {
@@ -124,7 +128,15 @@ fun ContinueWatchingScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 items(filtered, key = { it.key }) { entry ->
-                    ProgressRow(entry = entry, onClick = { onTitleClick(entry.tmdbId, entry.mediaType) })
+                    ProgressRow(
+                        entry = entry,
+                        onClick = { onTitleClick(entry.tmdbId, entry.mediaType) },
+                        onRemove = {
+                            scope.launch {
+                                library.markUnwatched(entry.tmdbId, entry.mediaType, entry.season, entry.episode)
+                            }
+                        },
+                    )
                 }
             }
         }
@@ -132,7 +144,7 @@ fun ContinueWatchingScreen(
 }
 
 @Composable
-private fun ProgressRow(entry: ProgressEntry, onClick: () -> Unit) {
+private fun ProgressRow(entry: ProgressEntry, onClick: () -> Unit, onRemove: () -> Unit = {}) {
     val pct = if (entry.duration > 0) (entry.position / entry.duration).coerceIn(0.0, 1.0).toFloat() else 0f
     Surface(
         onClick = onClick,
@@ -191,6 +203,23 @@ private fun ProgressRow(entry: ProgressEntry, onClick: () -> Unit) {
                             color = CyferAccent,
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+                // Remove from list — clears the progress entry (drops it
+                // from Continue, or un-marks it from History).
+                Surface(
+                    onClick = onRemove,
+                    shape = CircleShape,
+                    color = CyferDarkSurface,
+                    modifier = Modifier.size(30.dp),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Remove",
+                            tint = CyferTextTertiary,
+                            modifier = Modifier.size(16.dp),
                         )
                     }
                 }
