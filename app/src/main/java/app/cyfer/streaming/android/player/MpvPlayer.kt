@@ -191,6 +191,14 @@ object MpvPlayer : MPV.EventObserver {
         val gamutMappingMode: String = "perceptual",
         val sdrTargetPeakNits: Int = 203,
         val dolbyVisionForceHdr10: Boolean = false,
+        /** Force BT.2020/PQ output regardless of what
+         *  [HdrDisplayCapabilities.hdrCapable] reports. Override path
+         *  for devices whose OS advertises SDR but whose
+         *  panel+compositor can in fact display HDR pixels (custom
+         *  ROMs, A14+ AOSP variants). */
+        val forceHdrOutput: Boolean = false,
+        /** Target peak nits when forceHdrOutput is on. */
+        val forcedHdrPeakNits: Int = 600,
     )
 
     @Volatile private var currentHdrConfig: HdrPipelineConfig = HdrPipelineConfig()
@@ -221,7 +229,19 @@ object MpvPlayer : MPV.EventObserver {
         // whose own DV processor outperforms libplacebo's shader.
         setOption("vd-lavc-o", if (cfg.dolbyVisionForceHdr10) "strict=-2,dovi_strip=1" else "")
 
-        if (hdrCaps.hdrCapable) {
+        if (cfg.forceHdrOutput) {
+            // Override path: tell libplacebo to emit BT.2020/PQ pixels
+            // regardless of system-reported HDR caps. The compositor +
+            // panel will either honour it (HDR on screen) or naively
+            // map it (dim/oversaturated) — which is itself useful as a
+            // pipeline diagnostic.
+            setOption("target-colorspace-hint", "yes")
+            setOption("target-colorspace-hint-mode", "source-dynamic")
+            setOption("target-prim", "bt.2020")
+            setOption("target-trc", "pq")
+            setOption("target-peak", cfg.forcedHdrPeakNits.coerceIn(200, 2000).toString())
+            setOption("target-contrast", "auto")
+        } else if (hdrCaps.hdrCapable) {
             setOption("target-colorspace-hint", "yes")
             setOption("target-colorspace-hint-mode", "source-dynamic")
             setOption("target-prim", "auto")

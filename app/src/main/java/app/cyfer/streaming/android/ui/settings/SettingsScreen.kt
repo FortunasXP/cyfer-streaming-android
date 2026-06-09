@@ -197,8 +197,25 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                             onPick = { v -> mutate { it.copy(dolbyVisionMode = v) } },
                         )
                         ToggleRow(
+                            label = "Force HDR output",
+                            description = "Override system HDR detection — emit BT.2020/PQ pixels regardless of what Android reports. Useful on custom ROMs / OEM kernels where Display.HdrCapabilities is wrong. If the panel can't display HDR the picture will look dim; flip back off.",
+                            checked = settings.forceHdrOutput,
+                            onCheckedChange = { v -> mutate { it.copy(forceHdrOutput = v) } },
+                        )
+                        if (settings.forceHdrOutput) {
+                            IntSliderRow(
+                                label = "Forced HDR peak",
+                                description = "Target peak in nits for the forced HDR output. Match this to your panel's real peak brightness (typical phone OLEDs: 400–800).",
+                                range = 200..2000,
+                                step = 50,
+                                current = settings.forcedHdrPeakNits,
+                                valueLabel = { "$it nits" },
+                                onChange = { v -> mutate { it.copy(forcedHdrPeakNits = v) } },
+                            )
+                        }
+                        ToggleRow(
                             label = "HDR diagnostic overlay",
-                            description = "Show a small panel on the player listing source primaries, target peak, tone-mapping algo, and whether the display reported HDR back. For chasing OEM weirdness.",
+                            description = "Show a small panel on the player listing source primaries, target peak, tone-mapping algo, system HDR mode, and whether the display reported HDR back. For chasing OEM weirdness.",
                             checked = settings.hdrDiagnosticOverlay,
                             onCheckedChange = { v -> mutate { it.copy(hdrDiagnosticOverlay = v) } },
                         )

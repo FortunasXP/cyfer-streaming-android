@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.view.Display
 
@@ -14,12 +15,29 @@ enum class HdrDisplayFormat(val label: String, val shortLabel: String) {
     Hlg("HLG", "HLG"),
 }
 
+/**
+ * System-level HDR conversion mode (Android 14+). Mirrors AOSP's
+ * `HdrConversionMode.HDR_CONVERSION_*` constants but as a Kotlin enum
+ * we can read on every API level without reflection issues.
+ *  - [Unsupported]  — older device, no HDR conversion API.
+ *  - [Passthrough]  — system passes HDR through; what we want.
+ *  - [SystemTonemap] — system tone-maps to SDR even when we send HDR.
+ *  - [ForceHdr]     — system upgrades SDR to HDR; HDR content passes through.
+ */
+enum class HdrSystemConversionMode { Unsupported, Passthrough, SystemTonemap, ForceHdr, Unknown }
+
 data class HdrDisplayCapabilities(
     val formats: Set<HdrDisplayFormat> = emptySet(),
     val wideColorGamut: Boolean = false,
     val desiredMaxLuminance: Float? = null,
     val desiredMaxAverageLuminance: Float? = null,
     val desiredMinLuminance: Float? = null,
+    /** Android 14+ system HDR conversion mode. Tells us whether the OS
+     *  will tone-map our HDR output back to SDR (SystemTonemap = bad). */
+    val systemHdrConversion: HdrSystemConversionMode = HdrSystemConversionMode.Unknown,
+    /** Android 14+ HDR/SDR luminance ratio derived from display
+     *  brightness. 1.0 = no HDR head-room. Higher = more head-room. */
+    val hdrSdrRatio: Float? = null,
 ) {
     val hdrCapable: Boolean get() = formats.isNotEmpty()
 
@@ -133,13 +151,56 @@ object HdrDisplayDetector {
         val wideColor = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             (display?.isWideColorGamut == true || context.resources.configuration.isScreenWideColorGamut)
 
+        // Android 14+ system HDR conversion mode: read whether the OS
+        // will pass our HDR through, tone-map it to SDR, or upgrade SDR
+        // to HDR. If `SystemTonemap` we know our HDR pipeline is being
+        // clamped by the OS regardless of what we send. Reflection-safe
+        // — fall back to Unknown on older devices.
+        val (sysMode, hdrSdrRatio) = readSystemConversion(context, display)
+
         return HdrDisplayCapabilities(
             formats = hdrFormats,
             wideColorGamut = wideColor,
             desiredMaxLuminance = maxLum,
             desiredMaxAverageLuminance = maxAvgLum,
             desiredMinLuminance = minLum,
+            systemHdrConversion = sysMode,
+            hdrSdrRatio = hdrSdrRatio,
         )
+    }
+
+    private fun readSystemConversion(
+        context: Context,
+        display: Display?,
+    ): Pair<HdrSystemConversionMode, Float?> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            return HdrSystemConversionMode.Unsupported to null
+        }
+        val dm = runCatching {
+            context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+        }.getOrNull() ?: return HdrSystemConversionMode.Unknown to null
+
+        val mode = runCatching {
+            val m = dm.javaClass.getMethod("getHdrConversionModeSetting")
+            val res = m.invoke(dm) ?: return@runCatching HdrSystemConversionMode.Unknown
+            val raw = res.javaClass.getMethod("getConversionMode").invoke(res) as? Int
+                ?: return@runCatching HdrSystemConversionMode.Unknown
+            // Mirror the AOSP HdrConversionMode constants without an
+            // import (introduced in API 34).
+            when (raw) {
+                0 -> HdrSystemConversionMode.Unsupported
+                1 -> HdrSystemConversionMode.Passthrough
+                2 -> HdrSystemConversionMode.SystemTonemap
+                3 -> HdrSystemConversionMode.ForceHdr
+                else -> HdrSystemConversionMode.Unknown
+            }
+        }.getOrDefault(HdrSystemConversionMode.Unknown)
+
+        val ratio = runCatching {
+            val m = Display::class.java.getMethod("getHdrSdrRatio")
+            (m.invoke(display) as? Float)?.takeIf { it.isFinite() }
+        }.getOrNull()
+        return mode to ratio
     }
 
     fun applyHdrWindowMode(activity: Activity, caps: HdrDisplayCapabilities): (() -> Unit)? {

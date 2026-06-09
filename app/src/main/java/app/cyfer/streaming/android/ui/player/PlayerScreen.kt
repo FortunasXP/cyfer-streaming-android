@@ -315,6 +315,8 @@ fun PlayerScreen(
         playerSettings.gamutMappingMode,
         playerSettings.sdrTargetPeakNits,
         playerSettings.dolbyVisionMode,
+        playerSettings.forceHdrOutput,
+        playerSettings.forcedHdrPeakNits,
     ) {
         MpvPlayer.applyHdrConfig(
             app.cyfer.streaming.android.player.MpvPlayer.HdrPipelineConfig(
@@ -324,6 +326,8 @@ fun PlayerScreen(
                 sdrTargetPeakNits = playerSettings.sdrTargetPeakNits,
                 dolbyVisionForceHdr10 = playerSettings.dolbyVisionMode ==
                     app.cyfer.streaming.android.data.settings.DolbyVisionMode.HDR10,
+                forceHdrOutput = playerSettings.forceHdrOutput,
+                forcedHdrPeakNits = playerSettings.forcedHdrPeakNits,
             ),
         )
     }
@@ -1244,6 +1248,16 @@ private fun HdrDiagnosticOverlay(state: MpvPlaybackState, modifier: Modifier = M
     val rows = buildList {
         add("DISPLAY    " + display.shortLabel + if (state.hdrPipelineActive) " · ACTIVE" else " · sdr-out")
         add("PEAK OUT   " + (state.targetLuminanceNits.takeIf { it > 0 }?.let { "${it.toInt()} nit" } ?: "—"))
+        // Android-14+ system HDR conversion mode — if SystemTonemap the OS
+        // is silently mapping our HDR back to SDR regardless of what we
+        // send. Most useful diagnostic on a stuck-in-SDR device.
+        if (display.systemHdrConversion != app.cyfer.streaming.android.player.HdrSystemConversionMode.Unsupported &&
+            display.systemHdrConversion != app.cyfer.streaming.android.player.HdrSystemConversionMode.Unknown) {
+            add("SYS HDR    " + display.systemHdrConversion.name.lowercase())
+        }
+        display.hdrSdrRatio?.let { ratio ->
+            add("HDR/SDR    " + "%.2fx".format(ratio))
+        }
         add("SOURCE     " + (hdr.detailedLabel))
         add("PRIM/TRC   " + listOfNotNull(hdr.primaries, hdr.transfer).joinToString(" / ").ifBlank { "—" })
         add("SIG PEAK   " + (hdr.signalPeak?.let { "%.1f".format(it) } ?: "—") +

@@ -215,6 +215,22 @@ data class AppSettings(
     val dolbyVisionMode: DolbyVisionMode = DolbyVisionMode.AUTO,
 
     /**
+     * Force libmpv to output BT.2020/PQ pixels even when the OS doesn't
+     * report HDR display capability. Useful on devices where the
+     * Display.HdrCapabilities API returns nothing but the actual panel +
+     * compositor can still accept HDR (custom ROMs, A14+ ROMs that
+     * advertise HDR conversion etc.). When the OS truly can't render
+     * HDR the result will look dim — flip it back off.
+     */
+    val forceHdrOutput: Boolean = false,
+
+    /**
+     * Target peak nits used when [forceHdrOutput] is on. Defaults to
+     * 600 (mid-tier mobile HDR panel). Range 200..2000.
+     */
+    val forcedHdrPeakNits: Int = 600,
+
+    /**
      * Show the developer HDR diagnostic overlay on the player. Lists
      * source primaries/transfer/peak, current target prim/trc/peak,
      * tone-mapping algo, hdr-display-detected, target-luminance. Helps
