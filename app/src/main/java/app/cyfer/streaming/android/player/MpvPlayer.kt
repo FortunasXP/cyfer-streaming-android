@@ -227,11 +227,13 @@ object MpvPlayer : MPV.EventObserver {
         val toneMapping: String = "bt.2390",
         val gamutMappingMode: String = "perceptual",
         val sdrTargetPeakNits: Int = 203,
-        /** Force BT.2020/PQ output regardless of what
-         *  [HdrDisplayCapabilities.hdrCapable] reports. Override path
-         *  for devices whose OS advertises SDR but whose
+        /** Force BT.2020/PQ output when the OS advertises SDR but the
          *  panel+compositor can in fact display HDR pixels (custom
-         *  ROMs, A14+ AOSP variants). */
+         *  ROMs, A14+ AOSP variants). Only honoured by the planner
+         *  when the display reports SDR AND the EGL probe found an
+         *  HDR-capable swapchain — on an honest HDR display the auto
+         *  path wins, and without the EGL extension forcing is
+         *  physically impossible. */
         val forceHdrOutput: Boolean = false,
         /** Target peak nits when forceHdrOutput is on. */
         val forcedHdrPeakNits: Int = 600,
@@ -287,7 +289,12 @@ object MpvPlayer : MPV.EventObserver {
      * during a load.
      */
     private fun applyOutputPlan(hdrCaps: HdrDisplayCapabilities) {
-        val plan = planHdrOutput(_state.value.hdrVideo, hdrCaps, currentHdrConfig)
+        val plan = planHdrOutput(
+            _state.value.hdrVideo,
+            hdrCaps,
+            currentHdrConfig,
+            eglHdrCapable = EglHdrProbe.probe().hdrOutputPossible,
+        )
         if (plan == lastOutputPlan) return
         lastOutputPlan = plan
         Log.i(TAG, "HDR output plan: ${plan.description}")

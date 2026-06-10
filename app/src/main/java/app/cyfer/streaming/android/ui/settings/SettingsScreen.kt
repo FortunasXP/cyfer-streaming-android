@@ -223,22 +223,35 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                             color = CyferTextSecondary,
                             style = MaterialTheme.typography.bodySmall,
                         )
-                        ToggleRow(
-                            label = "Force HDR output",
-                            description = "Emit HDR even if Android claims this display is SDR (for ROMs that misreport). Looks dim if the panel truly can't.",
-                            checked = settings.forceHdrOutput,
-                            onCheckedChange = { v -> mutate { it.copy(forceHdrOutput = v) } },
-                        )
-                        if (settings.forceHdrOutput) {
-                            IntSliderRow(
-                                label = "Forced HDR peak",
-                                description = "Match your panel's real peak brightness.",
-                                range = 200..2000,
-                                step = 50,
-                                current = settings.forcedHdrPeakNits,
-                                valueLabel = { "$it nits" },
-                                onChange = { v -> mutate { it.copy(forcedHdrPeakNits = v) } },
+                        // Force-HDR is only offered where it can actually
+                        // work: the OS claims SDR (the misreporting-ROM
+                        // case the toggle exists for) AND the GL driver
+                        // has an HDR-capable swapchain. On an honest HDR
+                        // display the auto path is strictly better; on a
+                        // truly SDR GL stack forcing just dims the
+                        // picture. The planner enforces the same gate, so
+                        // a stale persisted "on" is ignored too.
+                        val eglHdrPossible = remember {
+                            app.cyfer.streaming.android.player.EglHdrProbe.probe().hdrOutputPossible
+                        }
+                        if (!displayCaps.hdrCapable && eglHdrPossible) {
+                            ToggleRow(
+                                label = "Force HDR output",
+                                description = "Android claims this display is SDR, but the graphics driver can output HDR — flip this if you know the panel is really HDR (common on custom ROMs). Looks dim if it truly isn't.",
+                                checked = settings.forceHdrOutput,
+                                onCheckedChange = { v -> mutate { it.copy(forceHdrOutput = v) } },
                             )
+                            if (settings.forceHdrOutput) {
+                                IntSliderRow(
+                                    label = "Forced HDR peak",
+                                    description = "Match your panel's real peak brightness.",
+                                    range = 200..2000,
+                                    step = 50,
+                                    current = settings.forcedHdrPeakNits,
+                                    valueLabel = { "$it nits" },
+                                    onChange = { v -> mutate { it.copy(forcedHdrPeakNits = v) } },
+                                )
+                            }
                         }
                         ToggleRow(
                             label = "HDR diagnostic overlay",
