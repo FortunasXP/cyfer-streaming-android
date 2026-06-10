@@ -1264,6 +1264,11 @@ private fun HdrDiagnosticOverlay(state: MpvPlaybackState, modifier: Modifier = M
     val rows = buildList {
         add("DISPLAY    " + display.shortLabel + if (state.hdrPipelineActive) " · ACTIVE" else " · sdr-out")
         add("PEAK OUT   " + (state.targetLuminanceNits.takeIf { it > 0 }?.let { "${it.toInt()} nit" } ?: "—"))
+        // The content-format × display-capability decision the planner
+        // made for this file — the single most useful line here.
+        if (state.outputPlanDescription.isNotBlank()) {
+            add("PLAN       " + state.outputPlanDescription)
+        }
         // Android-14+ system HDR conversion mode — if SystemTonemap the OS
         // is silently mapping our HDR back to SDR regardless of what we
         // send. Most useful diagnostic on a stuck-in-SDR device.

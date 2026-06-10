@@ -81,6 +81,10 @@ data class MpvPlaybackState(
     val targetLuminanceNits: Double = 0.0,
     /** Stream health surfaced by the PlayerScreen watchdogs. */
     val streamHealth: StreamHealth = StreamHealth.Normal,
+    /** Human-readable summary of the active HDR output decision, e.g.
+     *  "DV P8.1 → PQ out (600 nit) · display HDR10/HLG". Empty until
+     *  the first plan is computed. */
+    val outputPlanDescription: String = "",
 )
 
 /**
@@ -212,6 +216,10 @@ object MpvPlayer : MPV.EventObserver {
         }
     }
 
+    /** Last applied plan — lets us skip redundant option churn when
+     *  video-params fire repeatedly with the same effective values. */
+    @Volatile private var lastOutputPlan: HdrOutputPlan? = null
+
     private fun applyHdrOptions(hdrCaps: HdrDisplayCapabilities) {
         val cfg = currentHdrConfig
         // ── HDR pipeline ────────────────────────────────────────────
@@ -228,39 +236,43 @@ object MpvPlayer : MPV.EventObserver {
         // the RPU so libplacebo skips the reshape and renders the base
         // layer with the standard HDR10 tone curve. Useful on panels
         // whose own DV processor outperforms libplacebo's shader.
+        // Otherwise the RPU reshape is applied for EVERY output target —
+        // even SDR — because the reshaped signal tone-maps better.
         setOption("vd-lavc-o", if (cfg.dolbyVisionForceHdr10) "strict=-2,dovi_strip=1" else "")
 
-        if (cfg.forceHdrOutput) {
-            // Override path: tell libplacebo to emit BT.2020/PQ pixels
-            // regardless of system-reported HDR caps. The compositor +
-            // panel will either honour it (HDR on screen) or naively
-            // map it (dim/oversaturated) — which is itself useful as a
-            // pipeline diagnostic.
-            setOption("target-colorspace-hint", "yes")
+        applyOutputPlan(hdrCaps)
+    }
+
+    /**
+     * Content-format × display-capability decision. Re-runs whenever
+     * the source metadata, display caps, or user config change, so a
+     * DV file landing on an HDR10 panel and an HLG broadcast on an
+     * HLG panel each get the right output transfer. Deduped against
+     * the last applied plan because video-params fires several times
+     * during a load.
+     */
+    private fun applyOutputPlan(hdrCaps: HdrDisplayCapabilities) {
+        val plan = planHdrOutput(_state.value.hdrVideo, hdrCaps, currentHdrConfig)
+        if (plan == lastOutputPlan) return
+        lastOutputPlan = plan
+        Log.i(TAG, "HDR output plan: ${plan.description}")
+
+        setOption("target-colorspace-hint", if (plan.colorspaceHint) "yes" else "no")
+        if (plan.colorspaceHint) {
             setOption("target-colorspace-hint-mode", "source-dynamic")
-            setOption("target-prim", "bt.2020")
-            setOption("target-trc", "pq")
-            setOption("target-peak", cfg.forcedHdrPeakNits.coerceIn(200, 2000).toString())
-            setOption("target-contrast", "auto")
-        } else if (hdrCaps.hdrCapable) {
-            setOption("target-colorspace-hint", "yes")
-            setOption("target-colorspace-hint-mode", "source-dynamic")
-            setOption("target-prim", "auto")
-            setOption("target-trc", "auto")
-            setOption("target-peak", "auto")
-            // Let the display do its own dynamic-range expansion if it
-            // can — mpv hints, the OEM tone-mapper finishes.
-            setOption("target-contrast", "auto")
-        } else {
-            // SDR path: aim for the user-chosen target peak (default 203
-            // = BT.2408 reference). Most modern phone panels exceed 203,
-            // so the historical "100" setting crushed HDR highlights.
-            setOption("target-colorspace-hint", "no")
-            setOption("target-prim", "bt.709")
-            setOption("target-trc", "gamma2.2")
-            setOption("target-peak", cfg.sdrTargetPeakNits.coerceIn(100, 1500).toString())
-            setOption("target-contrast", "1000")
         }
+        setOption("target-prim", plan.targetPrim)
+        setOption("target-trc", plan.targetTrc)
+        setOption("target-peak", plan.targetPeak)
+        setOption("target-contrast", plan.targetContrast)
+        _state.update { it.copy(outputPlanDescription = plan.description) }
+    }
+
+    /** Recompute the output plan against the current display caps —
+     *  called when fresh source metadata lands (file load, video-params). */
+    private fun reapplyOutputPlan() {
+        if (!initialized) return
+        applyOutputPlan(_state.value.hdrDisplay)
     }
 
     private fun setOption(name: String, value: String) {
@@ -311,8 +323,14 @@ object MpvPlayer : MPV.EventObserver {
                 streamHealth = StreamHealth.Normal,
                 chapters = emptyList(),
                 demuxerCacheSeconds = 0.0,
+                outputPlanDescription = "",
             )
         }
+        // Drop the previous file's output plan so the next file's
+        // metadata recomputes from scratch (a DV plan must not leak
+        // into an SDR file that follows it).
+        lastOutputPlan = null
+        reapplyOutputPlan()
         mpv.command("loadfile", url)
     }
 
@@ -649,6 +667,9 @@ object MpvPlayer : MPV.EventObserver {
         if (dvProfile != null) {
             Log.i(TAG, "Detected Dolby Vision profile=$dvProfile level=${dvLevel ?: "?"}")
         }
+        // Fresh DV metadata can change the output plan ("DV P8.1 → PQ"
+        // vs the generic HDR label) — recompute now that we know.
+        reapplyOutputPlan()
     }
 
     /**
@@ -712,5 +733,9 @@ object MpvPlayer : MPV.EventObserver {
 
     private fun updateHdrVideo(update: (HdrVideoMetadata) -> HdrVideoMetadata) {
         _state.update { it.copy(hdrVideo = update(it.hdrVideo)) }
+        // Source colour metadata feeds the output plan (HLG vs PQ vs SDR
+        // source detection) — recompute. Deduped inside, so the repeated
+        // video-params/* updates during a load cost almost nothing.
+        reapplyOutputPlan()
     }
 }

@@ -133,6 +133,45 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                             color = CyferTextSecondary,
                             style = MaterialTheme.typography.bodySmall,
                         )
+                        // What the OS reports about this panel. Content is
+                        // matched against these formats at play time: DV /
+                        // HDR10 sources emit PQ on HDR panels, HLG emits HLG
+                        // natively, everything tone-maps down on SDR panels.
+                        val displayCtx = androidx.compose.ui.platform.LocalContext.current
+                        val displayCaps = remember {
+                            app.cyfer.streaming.android.player.HdrDisplayDetector.detect(displayCtx)
+                        }
+                        Surface(
+                            color = CyferCardSurface,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                                Text(
+                                    text = "Your display",
+                                    color = CyferWhite,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                                val capsLine = buildString {
+                                    if (displayCaps.hdrCapable) {
+                                        append("Supports ")
+                                        append(displayCaps.orderedFormats.joinToString(" · ") { it.label })
+                                        displayCaps.desiredMaxLuminance?.let {
+                                            append("  ·  peak ≈${it.toInt()} nits")
+                                        }
+                                    } else {
+                                        append("SDR only — HDR and Dolby Vision content is tone-mapped down")
+                                        if (displayCaps.wideColorGamut) append(" (wide colour gamut)")
+                                    }
+                                }
+                                Text(
+                                    text = capsLine,
+                                    color = CyferTextSecondary,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                        }
                         EnumPickerRow(
                             label = "Tone mapping algorithm",
                             description = "How HDR luminance maps to your display's range. BT.2390 is the modern broadcast standard.",

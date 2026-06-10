@@ -1,0 +1,113 @@
+package app.cyfer.streaming.android.player
+
+/**
+ * The resolved decision for "what should libplacebo emit for THIS source
+ * on THIS display" — the content-format × display-capability matrix.
+ *
+ * Background for future readers: mpv/libplacebo always *renders* the
+ * final pixels on the GPU. There is no tunneled Dolby Vision bitstream
+ * passthrough on this path (that's a MediaCodec-direct-to-surface
+ * feature used by DRM apps). So "playing Dolby Vision" here means:
+ * libdovi parses the RPU, libplacebo applies the reshape, and the
+ * result is emitted as PQ — which any HDR10-capable display reads.
+ * A DV-branded panel gets exactly the same (already-reshaped) pixels.
+ */
+data class HdrOutputPlan(
+    val targetPrim: String,
+    val targetTrc: String,
+    /** mpv target-peak value — a nit count or "auto". */
+    val targetPeak: String,
+    val targetContrast: String,
+    /** Whether to ask the compositor for an HDR colorspace. */
+    val colorspaceHint: Boolean,
+    /** Human-readable one-liner for the diagnostic overlay, e.g.
+     *  "DV P8.1 → PQ out · display HDR10/HLG". */
+    val description: String,
+)
+
+/**
+ * Decide the output target from source metadata + display capabilities
+ * + user config. Pure function — trivially testable, no mpv calls.
+ *
+ * Priority order:
+ *  1. Forced HDR override (user said "my OS lies, emit HDR anyway")
+ *  2. SDR-only display → tone-map down (BT.2390 by default)
+ *  3. HDR display:
+ *     a. HLG source on an HLG-capable display → emit HLG natively
+ *        (skips a pointless HLG→PQ conversion; broadcast content keeps
+ *        its system-gamma look)
+ *     b. everything else (PQ/HDR10/HDR10+/DV-reshaped) → emit PQ
+ *     c. target-peak = the panel's reported max luminance when the OS
+ *        gives us one — better than "auto" because libplacebo can
+ *        pre-shape highlights for the real panel instead of guessing
+ */
+fun planHdrOutput(
+    source: HdrVideoMetadata,
+    display: HdrDisplayCapabilities,
+    cfg: MpvPlayer.HdrPipelineConfig,
+): HdrOutputPlan {
+    val sourceLabel = source.detailedLabel
+    val displayShort = display.shortLabel
+
+    // 1 ── user override: emit HDR regardless of reported caps
+    if (cfg.forceHdrOutput) {
+        val peak = cfg.forcedHdrPeakNits.coerceIn(200, 2000)
+        return HdrOutputPlan(
+            targetPrim = "bt.2020",
+            targetTrc = "pq",
+            targetPeak = peak.toString(),
+            targetContrast = "auto",
+            colorspaceHint = true,
+            description = "$sourceLabel → PQ out (forced, $peak nit)",
+        )
+    }
+
+    // 2 ── SDR-only panel: tone-map down
+    if (!display.hdrCapable) {
+        val peak = cfg.sdrTargetPeakNits.coerceIn(100, 1500)
+        val how = if (source.active) "tone-map SDR (${cfg.toneMapping}, $peak nit)" else "SDR out"
+        return HdrOutputPlan(
+            targetPrim = "bt.709",
+            targetTrc = "gamma2.2",
+            targetPeak = peak.toString(),
+            targetContrast = "1000",
+            colorspaceHint = false,
+            description = "$sourceLabel → $how",
+        )
+    }
+
+    // 3 ── HDR-capable panel
+    val sourceIsHlg = (source.transfer ?: "").lowercase().let {
+        it.contains("hlg") || it.contains("arib-std-b67")
+    }
+    val displayHasHlg = HdrDisplayFormat.Hlg in display.formats
+
+    // Panel max luminance from Display.HdrCapabilities — when the OS
+    // reports a real number, hand it to libplacebo so highlight rolloff
+    // is shaped for the actual panel rather than a guess.
+    val panelPeak = display.desiredMaxLuminance
+        ?.takeIf { it.isFinite() && it > 50f }
+        ?.toInt()
+    val peakValue = panelPeak?.toString() ?: "auto"
+    val peakLabel = panelPeak?.let { "$it nit" } ?: "auto peak"
+
+    return if (sourceIsHlg && displayHasHlg) {
+        HdrOutputPlan(
+            targetPrim = "bt.2020",
+            targetTrc = "hlg",
+            targetPeak = peakValue,
+            targetContrast = "auto",
+            colorspaceHint = true,
+            description = "$sourceLabel → HLG out (native, $peakLabel) · display $displayShort",
+        )
+    } else {
+        HdrOutputPlan(
+            targetPrim = "bt.2020",
+            targetTrc = "pq",
+            targetPeak = peakValue,
+            targetContrast = "auto",
+            colorspaceHint = true,
+            description = "$sourceLabel → PQ out ($peakLabel) · display $displayShort",
+        )
+    }
+}
