@@ -313,6 +313,15 @@ fun PlayerScreen(
     LaunchedEffect(playerSettings.hardwareDecoding) {
         MpvPlayer.setHardwareDecoding(playerSettings.hardwareDecoding.mpvOption())
     }
+    // Track-selection memory: feed the persisted language preferences
+    // into mpv's alang/slang so every load auto-picks the user's last
+    // manually chosen audio/subtitle language (desktop parity).
+    LaunchedEffect(playerSettings.preferredAudioLanguage, playerSettings.preferredSubtitleLanguage) {
+        MpvPlayer.applyTrackPreferences(
+            audioLang = playerSettings.preferredAudioLanguage,
+            subLang = playerSettings.preferredSubtitleLanguage,
+        )
+    }
     // Reactive HDR pipeline — flips libplacebo's tone-mapping, gamut
     // mapping, SDR target peak, and forced-HDR override as the user
     // tweaks them in Settings. Re-fires applyHdrOptions() so the live
@@ -738,8 +747,34 @@ fun PlayerScreen(
                 onDismiss = { pickerOpen = null },
                 onPick = { id ->
                     when (kind) {
-                        PickerKind.Audio -> MpvPlayer.setAudioTrack(id)
-                        PickerKind.Subtitle -> MpvPlayer.setSubtitleTrack(id)
+                        PickerKind.Audio -> {
+                            MpvPlayer.setAudioTrack(id)
+                            // Remember the language so subsequent files
+                            // auto-select it (mpv alang). Tracks with no
+                            // language tag (e.g. "Commentary") don't
+                            // overwrite the stored preference.
+                            playbackState.audioTracks.firstOrNull { it.id == id }?.lang
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let { lang ->
+                                    libScope.launch {
+                                        settingsRepo.update { it.copy(preferredAudioLanguage = lang) }
+                                    }
+                                }
+                        }
+                        PickerKind.Subtitle -> {
+                            MpvPlayer.setSubtitleTrack(id)
+                            // "Off" (id 0) is remembered too — subs stay
+                            // disabled on the next file until the user
+                            // picks a language again.
+                            val pref = if (id <= 0) "off"
+                            else playbackState.subtitleTracks.firstOrNull { it.id == id }?.lang
+                                ?.takeIf { it.isNotBlank() }
+                            pref?.let { p ->
+                                libScope.launch {
+                                    settingsRepo.update { it.copy(preferredSubtitleLanguage = p) }
+                                }
+                            }
+                        }
                     }
                     pickerOpen = null
                 },
@@ -2103,6 +2138,53 @@ private fun PlaybackOptionsSheet(
                         label = if (subBackdrop) "Dim On" else "Dim Off",
                         selected = subBackdrop,
                         onClick = { onSubBackdrop(!subBackdrop) },
+                    )
+                }
+            }
+
+            // ── Now playing — live stats (desktop PlayerStats parity).
+            //    Polled once a second while the sheet is open; reading a
+            //    handful of properties on demand beats observing them
+            //    for the whole session.
+            val pbState by MpvPlayer.state.collectAsStateWithLifecycle()
+            var stats by remember { mutableStateOf(MpvPlayer.PlaybackStats()) }
+            LaunchedEffect(Unit) {
+                while (true) {
+                    stats = MpvPlayer.readPlaybackStats()
+                    delay(1000)
+                }
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("NOW PLAYING", color = CyferTextTertiary, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+                val rows = buildList {
+                    val video = listOfNotNull(
+                        pbState.videoCodec?.takeIf { it.isNotBlank() }?.substringBefore(" ")?.uppercase(),
+                        stats.videoSize,
+                        stats.fps?.let { "%.3f fps".format(it) },
+                        stats.videoBitrateMbps?.takeIf { it > 0 }?.let { "%.1f Mbps".format(it) },
+                    )
+                    if (video.isNotEmpty()) add("VIDEO   " + video.joinToString(" · "))
+                    val audio = listOfNotNull(
+                        pbState.audioCodec?.takeIf { it.isNotBlank() }?.uppercase(),
+                        stats.channelLayout,
+                        stats.sampleRateHz?.let { "${it / 1000} kHz" },
+                        stats.audioBitrateKbps?.takeIf { it > 0 }?.let { "${it.toInt()} kbps" },
+                    )
+                    if (audio.isNotEmpty()) add("AUDIO   " + audio.joinToString(" · "))
+                    val health = listOfNotNull(
+                        stats.avSyncSeconds?.let { "sync %+.0f ms".format(it * 1000) },
+                        stats.droppedFrames?.takeIf { it > 0 }?.let { "$it dropped" },
+                        "cache ${pbState.demuxerCacheSeconds.toInt()}s",
+                        pbState.hwdec?.takeIf { it.isNotBlank() },
+                    )
+                    add("HEALTH  " + health.joinToString(" · "))
+                }
+                rows.forEach { line ->
+                    Text(
+                        text = line,
+                        color = CyferTextSecondary,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     )
                 }
             }

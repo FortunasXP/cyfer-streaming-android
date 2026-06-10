@@ -162,6 +162,21 @@ data class AppSettings(
     val hardwareDecoding: HardwareDecodingMode = HardwareDecodingMode.AUTO,
 
     /**
+     * Track-selection memory (ported from desktop's saveTrackPrefs):
+     * the language of the last audio track the user manually picked in
+     * the player. Fed to mpv's `alang` so every subsequent file
+     * auto-selects the same language. Empty = no preference.
+     */
+    val preferredAudioLanguage: String = "",
+
+    /**
+     * Same for subtitles (`slang`). Empty = no preference; the special
+     * value "off" means the user last chose "Off" — subtitles default
+     * to disabled on the next file.
+     */
+    val preferredSubtitleLanguage: String = "",
+
+    /**
      * When the user crosses ~95% on a TV/anime episode, show an "Up Next"
      * card and auto-advance to the next episode after a 10s countdown.
      * Off-by-default — the user opts in.

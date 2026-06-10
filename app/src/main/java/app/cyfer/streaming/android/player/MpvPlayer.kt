@@ -470,6 +470,45 @@ object MpvPlayer : MPV.EventObserver {
 
     fun getCurrentUrl(): String? = currentUrl
 
+    /**
+     * Point-in-time playback statistics for the options sheet (desktop
+     * PlayerStats parity). Read on demand — polling a handful of
+     * properties once a second while the sheet is open is far cheaper
+     * than observing them all for the whole session. All reads go
+     * through the string API and tolerate missing values (e.g. bitrate
+     * is unavailable for the first seconds of a stream).
+     */
+    data class PlaybackStats(
+        val videoSize: String? = null,        // "3840×1608"
+        val fps: Double? = null,              // estimated decoder fps
+        val videoBitrateMbps: Double? = null,
+        val audioBitrateKbps: Double? = null,
+        val sampleRateHz: Int? = null,
+        val channelLayout: String? = null,
+        val avSyncSeconds: Double? = null,
+        val droppedFrames: Long? = null,
+    )
+
+    fun readPlaybackStats(): PlaybackStats {
+        if (!initialized) return PlaybackStats()
+        fun str(prop: String): String? =
+            runCatching { mpv.getPropertyString(prop) }.getOrNull()?.takeIf { it.isNotBlank() }
+        fun num(prop: String): Double? = str(prop)?.toDoubleOrNull()
+
+        val w = num("video-params/w")?.toInt()
+        val h = num("video-params/h")?.toInt()
+        return PlaybackStats(
+            videoSize = if (w != null && h != null) "${w}×${h}" else null,
+            fps = num("estimated-vf-fps") ?: num("container-fps"),
+            videoBitrateMbps = num("video-bitrate")?.div(1_000_000.0),
+            audioBitrateKbps = num("audio-bitrate")?.div(1_000.0),
+            sampleRateHz = num("audio-params/samplerate")?.toInt(),
+            channelLayout = str("audio-params/hr-channels") ?: str("audio-params/channels"),
+            avSyncSeconds = num("avsync"),
+            droppedFrames = num("frame-drop-count")?.toLong(),
+        )
+    }
+
     fun togglePause() {
         if (!initialized) return
         val paused = mpv.getPropertyBoolean("pause") ?: false
@@ -515,6 +554,32 @@ object MpvPlayer : MPV.EventObserver {
     fun seekToChapter(chapter: MpvChapter) {
         if (!initialized) return
         mpv.command("seek", chapter.time.toString(), "absolute")
+    }
+
+    /**
+     * Track-selection memory: mpv's `alang`/`slang` option lists drive
+     * automatic track selection on every subsequent load, so the
+     * language of the user's last manual pick carries across files
+     * (desktop parity with saveTrackPrefs). [subLang] supports the
+     * special value "off" — subtitles default to disabled.
+     */
+    fun applyTrackPreferences(audioLang: String, subLang: String) {
+        if (!initialized) return
+        setOption("alang", audioLang)
+        when (subLang) {
+            "off" -> {
+                setOption("slang", "")
+                setOption("sid", "no")
+            }
+            "" -> {
+                setOption("slang", "")
+                setOption("sid", "auto")
+            }
+            else -> {
+                setOption("slang", subLang)
+                setOption("sid", "auto")
+            }
+        }
     }
 
     fun setAudioTrack(id: Int) {

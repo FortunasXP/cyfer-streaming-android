@@ -573,6 +573,50 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                             color = CyferTextSecondary,
                             style = MaterialTheme.typography.bodySmall,
                         )
+                        // Lazy update check — one GitHub releases fetch
+                        // per app session; row only appears when a newer
+                        // tag exists, tapping opens the release page.
+                        val aboutCtx = androidx.compose.ui.platform.LocalContext.current
+                        val updateInfo by produceState<app.cyfer.streaming.android.data.updates.UpdateChecker.UpdateInfo?>(initialValue = null) {
+                            value = app.cyfer.streaming.android.data.updates.UpdateChecker
+                                .checkForNewerRelease(app.cyfer.streaming.android.BuildConfig.VERSION_NAME)
+                        }
+                        updateInfo?.let { info ->
+                            Surface(
+                                onClick = {
+                                    runCatching {
+                                        aboutCtx.startActivity(
+                                            android.content.Intent(
+                                                android.content.Intent.ACTION_VIEW,
+                                                android.net.Uri.parse(info.releaseUrl),
+                                            ),
+                                        )
+                                    }
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = CyferAccent.copy(alpha = 0.14f),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "Update available — v${info.versionName}",
+                                            color = CyferAccent,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                        )
+                                        Text(
+                                            text = "Tap to open the release page and grab the new APK.",
+                                            color = CyferTextSecondary,
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
