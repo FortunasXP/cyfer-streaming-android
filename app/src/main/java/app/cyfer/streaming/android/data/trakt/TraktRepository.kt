@@ -10,12 +10,17 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import app.cyfer.streaming.android.data.library.LibraryRepository
 import app.cyfer.streaming.android.data.library.WatchlistEntry
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -37,11 +42,13 @@ private val Context.traktDataStore: DataStore<Preferences> by preferencesDataSto
 
 private val JSON_MEDIA = "application/json".toMediaType()
 
+/** Refresh the access token when it's inside this pre-expiry window. */
+private const val REFRESH_AHEAD_MS = 48 * 60 * 60 * 1000L
+
 /**
  * Talks to Trakt directly. Handles device-code OAuth, persists the
- * token, refreshes automatically on expiry, and exposes one-shot sync
- * helpers (import watchlist for now; mark-watched / scrobble follow in
- * subsequent slices once they're wired into the player).
+ * token, refreshes it automatically (proactively near expiry and on
+ * 401), and exposes scrobble / history / watchlist sync helpers.
  */
 class TraktRepository(private val context: Context) {
 
@@ -51,6 +58,15 @@ class TraktRepository(private val context: Context) {
         .build()
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    /** Repository-owned scope for fire-and-forget pushes (scrobble stop
+     *  from a dying composition, watchlist toggles). Survives any UI
+     *  lifecycle — exactly what onDispose callers need. */
+    private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Serialises token refreshes so concurrent API calls don't race
+     *  the rotation (Trakt invalidates the old refresh token on use). */
+    private val refreshMutex = Mutex()
 
     val session: Flow<TraktSession> = context.traktDataStore.data
         .catch { err ->
@@ -165,6 +181,86 @@ class TraktRepository(private val context: Context) {
         }.getOrNull()
     }
 
+    // ─────────────────────────── Token refresh ───────────────────────────
+
+    /**
+     * Session with a guaranteed-usable token. Refreshes proactively
+     * inside the 48 h pre-expiry window; Trakt refresh tokens survive
+     * access-token expiry, so even an install that sat idle past the
+     * ~90-day token life recovers silently here. Returns null when not
+     * connected or the refresh was rejected (token revoked).
+     */
+    private suspend fun validSession(): TraktSession? {
+        val s = session.first()
+        if (!s.isConnected) return null
+        val threshold = System.currentTimeMillis() + REFRESH_AHEAD_MS
+        if (s.expiresAt == 0L || s.expiresAt > threshold) return s
+        return refreshMutex.withLock {
+            // Another caller may have refreshed while we waited.
+            val latest = session.first()
+            when {
+                !latest.isConnected -> null
+                latest.expiresAt > threshold -> latest
+                else -> doRefresh(latest) ?: latest.takeIf { !it.isExpired }
+            }
+        }
+    }
+
+    /**
+     * Exchange the refresh token at `/oauth/token`. A 4xx means the
+     * grant was revoked on trakt.tv — wipe the session so the Settings
+     * UI offers reconnect instead of failing silently forever. Network
+     * errors keep the old session (the access token may still work).
+     */
+    private suspend fun doRefresh(old: TraktSession): TraktSession? = withContext(Dispatchers.IO) {
+        if (old.refreshToken.isBlank()) return@withContext null
+        val body = """
+            {"refresh_token":"${old.refreshToken}",
+             "client_id":"${TraktConfig.CLIENT_ID}",
+             "client_secret":"${TraktConfig.CLIENT_SECRET}",
+             "redirect_uri":"urn:ietf:wg:oauth:2.0:oob",
+             "grant_type":"refresh_token"}
+        """.trimIndent().toRequestBody(JSON_MEDIA)
+        val req = Request.Builder()
+            .url("${TraktConfig.API_BASE}/oauth/token")
+            .post(body)
+            .header("User-Agent", TraktConfig.USER_AGENT)
+            .build()
+        runCatching {
+            client.newCall(req).execute().use { res ->
+                when {
+                    res.isSuccessful -> {
+                        val obj = json.parseToJsonElement(res.body?.string().orEmpty()) as JsonObject
+                        val access = (obj["access_token"] as JsonPrimitive).content
+                        val refresh = (obj["refresh_token"] as? JsonPrimitive)?.contentOrNull
+                            ?.takeIf { it.isNotBlank() } ?: old.refreshToken
+                        val createdAt = (obj["created_at"] as? JsonPrimitive)?.intOrNull
+                            ?: (System.currentTimeMillis() / 1000).toInt()
+                        val expiresIn = (obj["expires_in"] as? JsonPrimitive)?.intOrNull ?: 7776000
+                        val fresh = old.copy(
+                            accessToken = access,
+                            refreshToken = refresh,
+                            expiresAt = (createdAt.toLong() + expiresIn) * 1000L,
+                            updatedAt = System.currentTimeMillis(),
+                        )
+                        saveSession(fresh)
+                        Log.i(TAG, "Trakt token refreshed")
+                        fresh
+                    }
+                    res.code in 400..403 -> {
+                        Log.w(TAG, "Trakt refresh rejected (HTTP ${res.code}) — disconnecting")
+                        saveSession(TraktSession())
+                        null
+                    }
+                    else -> {
+                        Log.w(TAG, "Trakt refresh failed (HTTP ${res.code})")
+                        null
+                    }
+                }
+            }
+        }.onFailure { Log.w(TAG, "Trakt refresh error: ${it.message}") }.getOrNull()
+    }
+
     // ─────────────────────────── Import watchlist ───────────────────────────
 
     /**
@@ -193,25 +289,30 @@ class TraktRepository(private val context: Context) {
         season: Int? = null,
         episode: Int? = null,
     ) = withContext(Dispatchers.IO) {
-        val s = session.first()
-        if (!s.isConnected || imdbId.isBlank()) return@withContext
-        val path = "/scrobble/${action.token}"
+        if (imdbId.isBlank()) return@withContext
         val pct = progressPercent.coerceIn(0f, 100f)
         val body = if (season != null && episode != null) {
             """{"show":{"ids":{"imdb":"$imdbId"}},"episode":{"season":$season,"number":$episode},"progress":$pct}"""
         } else {
             """{"movie":{"ids":{"imdb":"$imdbId"}},"progress":$pct}"""
-        }.toRequestBody(JSON_MEDIA)
-        val req = Request.Builder()
-            .url("${TraktConfig.API_BASE}$path")
-            .post(body)
-            .header("Authorization", "Bearer ${s.accessToken}")
-            .header("trakt-api-version", "2")
-            .header("trakt-api-key", TraktConfig.CLIENT_ID)
-            .header("User-Agent", TraktConfig.USER_AGENT)
-            .build()
-        runCatching { client.newCall(req).execute().use { /* swallow body */ } }
-            .onFailure { Log.w(TAG, "scrobble/$action failed: ${it.message}") }
+        }
+        postTrakt("/scrobble/${action.token}", body, "scrobble/${action.token}")
+    }
+
+    /**
+     * Fire-and-forget scrobble on the repository's own scope. The stop
+     * scrobble fires from the player's onDispose, where the composition
+     * scope is being cancelled at that very moment — launching there
+     * silently dropped the one call that marks titles watched (≥80%).
+     */
+    fun scrobbleAsync(
+        action: ScrobbleAction,
+        imdbId: String,
+        progressPercent: Float,
+        season: Int? = null,
+        episode: Int? = null,
+    ) {
+        repoScope.launch { scrobble(action, imdbId, progressPercent, season, episode) }
     }
 
     enum class ScrobbleAction(val token: String) { Start("start"), Pause("pause"), Stop("stop") }
@@ -233,14 +334,13 @@ class TraktRepository(private val context: Context) {
         episode: Int? = null,
         watchedAtIso: String = nowIso(),
     ) = withContext(Dispatchers.IO) {
-        val s = session.first()
-        if (!s.isConnected || imdbId.isBlank()) return@withContext
+        if (imdbId.isBlank()) return@withContext
         val body = if (mediaType == "movie") {
             """{"movies":[{"ids":{"imdb":"$imdbId"},"watched_at":"$watchedAtIso"}]}"""
         } else {
             """{"shows":[{"ids":{"imdb":"$imdbId"},"seasons":[{"number":${season ?: 1},"episodes":[{"number":${episode ?: 1},"watched_at":"$watchedAtIso"}]}]}]}"""
-        }.toRequestBody(JSON_MEDIA)
-        postTrakt("/sync/history", body, s.accessToken, "markWatched")
+        }
+        postTrakt("/sync/history", body, "markWatched")
     }
 
     /**
@@ -254,14 +354,13 @@ class TraktRepository(private val context: Context) {
         season: Int? = null,
         episode: Int? = null,
     ) = withContext(Dispatchers.IO) {
-        val s = session.first()
-        if (!s.isConnected || imdbId.isBlank()) return@withContext
+        if (imdbId.isBlank()) return@withContext
         val body = if (mediaType == "movie") {
             """{"movies":[{"ids":{"imdb":"$imdbId"}}]}"""
         } else {
             """{"shows":[{"ids":{"imdb":"$imdbId"},"seasons":[{"number":${season ?: 1},"episodes":[{"number":${episode ?: 1}}]}]}]}"""
-        }.toRequestBody(JSON_MEDIA)
-        postTrakt("/sync/history/remove", body, s.accessToken, "removeWatched")
+        }
+        postTrakt("/sync/history/remove", body, "removeWatched")
     }
 
     /** Mark a whole season watched in one request. */
@@ -271,38 +370,67 @@ class TraktRepository(private val context: Context) {
         episodeNumbers: List<Int>,
         watchedAtIso: String = nowIso(),
     ) = withContext(Dispatchers.IO) {
-        val s = session.first()
-        if (!s.isConnected || imdbId.isBlank() || episodeNumbers.isEmpty()) return@withContext
+        if (imdbId.isBlank() || episodeNumbers.isEmpty()) return@withContext
         val eps = episodeNumbers.joinToString(",") { """{"number":$it,"watched_at":"$watchedAtIso"}""" }
         val body = """{"shows":[{"ids":{"imdb":"$imdbId"},"seasons":[{"number":$season,"episodes":[$eps]}]}]}"""
-            .toRequestBody(JSON_MEDIA)
-        postTrakt("/sync/history", body, s.accessToken, "markSeasonWatched")
+        postTrakt("/sync/history", body, "markSeasonWatched")
     }
 
-    private fun postTrakt(
-        path: String,
-        body: okhttp3.RequestBody,
-        accessToken: String,
-        tag: String,
-    ) {
-        val req = Request.Builder()
-            .url("${TraktConfig.API_BASE}$path")
-            .post(body)
-            .header("Authorization", "Bearer $accessToken")
-            .header("trakt-api-version", "2")
-            .header("trakt-api-key", TraktConfig.CLIENT_ID)
-            .header("User-Agent", TraktConfig.USER_AGENT)
-            .build()
-        runCatching { client.newCall(req).execute().use { /* swallow body */ } }
-            .onFailure { Log.w(TAG, "$tag failed: ${it.message}") }
+    // ─────────────────────────── Watchlist push ───────────────────────────
+
+    /**
+     * Mirror a local watchlist toggle to Trakt (`/sync/watchlist` and
+     * `/sync/watchlist/remove`). Fire-and-forget like the scrobbles —
+     * the local toggle must never wait on (or fail with) the network.
+     */
+    fun pushWatchlistAsync(add: Boolean, imdbId: String?, mediaType: String) {
+        if (imdbId.isNullOrBlank()) return
+        repoScope.launch {
+            val key = if (mediaType == "movie") "movies" else "shows"
+            val body = """{"$key":[{"ids":{"imdb":"$imdbId"}}]}"""
+            postTrakt(
+                if (add) "/sync/watchlist" else "/sync/watchlist/remove",
+                body,
+                "pushWatchlist",
+            )
+        }
+    }
+
+    /**
+     * Authenticated Trakt write. Resolves a fresh session (refreshing
+     * near expiry), and on a 401 — token invalidated server-side ahead
+     * of schedule — forces one refresh and resends once. Non-2xx is
+     * logged; callers never see errors (Trakt must not break the app).
+     */
+    private suspend fun postTrakt(path: String, jsonBody: String, tag: String) {
+        val s = validSession() ?: return
+
+        fun callOnce(token: String): Int? = runCatching {
+            val req = Request.Builder()
+                .url("${TraktConfig.API_BASE}$path")
+                .post(jsonBody.toRequestBody(JSON_MEDIA))
+                .header("Authorization", "Bearer $token")
+                .header("trakt-api-version", "2")
+                .header("trakt-api-key", TraktConfig.CLIENT_ID)
+                .header("User-Agent", TraktConfig.USER_AGENT)
+                .build()
+            client.newCall(req).execute().use { it.code }
+        }.onFailure { Log.w(TAG, "$tag failed: ${it.message}") }.getOrNull()
+
+        var code = callOnce(s.accessToken) ?: return
+        if (code == 401) {
+            val refreshed = refreshMutex.withLock { doRefresh(session.first()) } ?: return
+            code = callOnce(refreshed.accessToken) ?: return
+        }
+        if (code !in 200..299) Log.w(TAG, "$tag HTTP $code")
     }
 
     private fun nowIso(): String =
         java.time.format.DateTimeFormatter.ISO_INSTANT.format(java.time.Instant.now())
 
     suspend fun importWatchlist(): TraktSyncResult = withContext(Dispatchers.IO) {
-        val s = session.first()
-        if (!s.isConnected) return@withContext TraktSyncResult(false, error = "Not connected to Trakt")
+        val s = validSession()
+            ?: return@withContext TraktSyncResult(false, error = "Not connected to Trakt")
         val library = LibraryRepository.get(context)
         var imported = 0
         var skipped = 0

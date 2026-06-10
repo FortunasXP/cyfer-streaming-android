@@ -55,6 +55,20 @@ fun MyListScreen(
     val context = LocalContext.current
     val repo = remember { LibraryRepository.get(context) }
     val watchlist by repo.watchlist.collectAsStateWithLifecycle(initialValue = emptyList())
+    // Watch progress per title — drives the thin bar on poster cards so
+    // shows you're mid-way through read as "continue" at a glance.
+    // Episodes carry the series tmdbId, so one map covers both movies
+    // and the latest-watched episode of a show.
+    val progress by repo.progress.collectAsStateWithLifecycle(initialValue = emptyList())
+    val progressByTitle = remember(progress) {
+        progress
+            .filter { !it.watched && it.position > 0 && it.duration > 0 }
+            .groupBy { it.seriesTmdbId ?: it.tmdbId }
+            .mapValues { (_, entries) ->
+                val latest = entries.maxBy { it.updatedAt }
+                (latest.position / latest.duration).coerceIn(0.0, 1.0).toFloat()
+            }
+    }
 
     var filter by rememberSaveable { mutableStateOf(MyListFilter.All) }
     var sort by rememberSaveable { mutableStateOf(MyListSort.Recent) }
@@ -160,6 +174,7 @@ fun MyListScreen(
                 items(filtered, key = { "${it.mediaType}:${it.tmdbId}" }) { entry ->
                     PosterGridCard(
                         entry = entry,
+                        progressFraction = progressByTitle[entry.tmdbId],
                         onClick = { onTitleClick(entry.tmdbId, entry.mediaType) },
                     )
                 }
@@ -203,6 +218,7 @@ private fun SortPill(
 @Composable
 private fun PosterGridCard(
     entry: WatchlistEntry,
+    progressFraction: Float? = null,
     onClick: () -> Unit,
 ) {
     Column {
@@ -237,6 +253,25 @@ private fun PosterGridCard(
                         ),
                     ),
             )
+            // In-progress bar — same treatment as the Continue Watching
+            // card so "you're mid-way through this" reads identically
+            // everywhere.
+            progressFraction?.let { frac ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .align(Alignment.BottomCenter)
+                        .background(Color.Black.copy(alpha = 0.45f)),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(frac)
+                            .fillMaxHeight()
+                            .background(CyferAccent),
+                    )
+                }
+            }
             // Tap layer
             Box(
                 modifier = Modifier

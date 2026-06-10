@@ -215,16 +215,17 @@ fun PlayerScreen(
                 imdbId, currentPct(), season, episode,
             )
         }
-        // Stop scrobble on dispose — Trakt marks watched at ≥80%.
+        // Stop scrobble on dispose — Trakt marks watched at ≥80%. Uses
+        // the repository's own scope: the composition scope is being
+        // cancelled at this exact moment, so launching on it silently
+        // dropped the stop (and with it the watched mark).
         DisposableEffect(Unit) {
             onDispose {
                 if (startedScrobble) {
-                    libScope.launch {
-                        traktRepo.scrobble(
-                            app.cyfer.streaming.android.data.trakt.TraktRepository.ScrobbleAction.Stop,
-                            imdbId, currentPct(), season, episode,
-                        )
-                    }
+                    traktRepo.scrobbleAsync(
+                        app.cyfer.streaming.android.data.trakt.TraktRepository.ScrobbleAction.Stop,
+                        imdbId, currentPct(), season, episode,
+                    )
                 }
             }
         }

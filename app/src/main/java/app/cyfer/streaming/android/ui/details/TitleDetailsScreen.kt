@@ -203,7 +203,7 @@ fun TitleDetailsScreen(
                 FilledIconButton(
                     onClick = {
                         libraryScope.launch {
-                            libraryRepo.toggleWatchlist(
+                            val added = libraryRepo.toggleWatchlist(
                                 app.cyfer.streaming.android.data.library.WatchlistEntry(
                                     tmdbId = item.id,
                                     mediaType = mediaType,
@@ -214,6 +214,13 @@ fun TitleDetailsScreen(
                                     voteAverage = item.vote_average,
                                     addedAt = System.currentTimeMillis(),
                                 ),
+                            )
+                            // Mirror the toggle to Trakt's watchlist —
+                            // fire-and-forget, keyed by IMDb id.
+                            traktRepo.pushWatchlistAsync(
+                                add = added,
+                                imdbId = item.stremioId,
+                                mediaType = mediaType,
                             )
                         }
                     },
