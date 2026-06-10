@@ -118,7 +118,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                 SettingsTab.Playback -> {
                     SettingsSection(title = "Hardware decoding") {
                         Text(
-                            text = "Cyfer uses MPV with MediaCodec on Android. Switch modes if a stream stutters, has wrong colours, or won't play at all on this device.",
+                            text = "Switch modes only if a stream stutters or won't play.",
                             color = CyferTextSecondary,
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -129,7 +129,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                     }
                     SettingsSection(title = "HDR pipeline") {
                         Text(
-                            text = "Cyfer's libmpv ships libdovi + libplacebo. Defaults match BT.2408 reference and look great on most phones — tweak if a specific title doesn't.",
+                            text = "Defaults look right on most phones — only tweak if a title looks off.",
                             color = CyferTextSecondary,
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -174,7 +174,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                         }
                         EnumPickerRow(
                             label = "Tone mapping algorithm",
-                            description = "How HDR luminance maps to your display's range. BT.2390 is the modern broadcast standard.",
+                            description = "How HDR highlights compress to your panel's range.",
                             options = listOf(
                                 app.cyfer.streaming.android.data.settings.ToneMappingAlgorithm.AUTO to "Auto (BT.2390)",
                                 app.cyfer.streaming.android.data.settings.ToneMappingAlgorithm.BT2390 to "BT.2390",
@@ -189,7 +189,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                         )
                         EnumPickerRow(
                             label = "Gamut mapping",
-                            description = "How wide-gamut HDR colour fits into the panel's smaller colour space. Perceptual preserves hue.",
+                            description = "How wide-gamut colour fits the panel. Perceptual preserves hue.",
                             options = listOf(
                                 app.cyfer.streaming.android.data.settings.GamutMappingMode.PERCEPTUAL to "Perceptual (recommended)",
                                 app.cyfer.streaming.android.data.settings.GamutMappingMode.RELATIVE to "Relative",
@@ -205,7 +205,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                         )
                         IntSliderRow(
                             label = "SDR target peak",
-                            description = "Nits the SDR display can hit. BT.2408 reference = 203. Modern OLEDs can take 400–600.",
+                            description = "Brightness your screen can hit in SDR. Reference is 203.",
                             range = 100..1000,
                             step = 25,
                             current = settings.sdrTargetPeakNits,
@@ -219,20 +219,20 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                         // carry RPU metadata. The old Auto/Strip picker
                         // controlled an FFmpeg option that doesn't exist.
                         Text(
-                            text = "Dolby Vision: profile 8 plays as its HDR10/HLG base layer (that's what the hardware decoder outputs). Profile 5 has no compatible base layer — the player warns and you should prefer an HDR10 or P8 source.",
+                            text = "Dolby Vision P8 plays as HDR10/HLG. P5 isn't supported — pick an HDR10 or P8 source.",
                             color = CyferTextSecondary,
                             style = MaterialTheme.typography.bodySmall,
                         )
                         ToggleRow(
                             label = "Force HDR output",
-                            description = "Override system HDR detection — emit BT.2020/PQ pixels regardless of what Android reports. Useful on custom ROMs / OEM kernels where Display.HdrCapabilities is wrong. If the panel can't display HDR the picture will look dim; flip back off.",
+                            description = "Emit HDR even if Android claims this display is SDR (for ROMs that misreport). Looks dim if the panel truly can't.",
                             checked = settings.forceHdrOutput,
                             onCheckedChange = { v -> mutate { it.copy(forceHdrOutput = v) } },
                         )
                         if (settings.forceHdrOutput) {
                             IntSliderRow(
                                 label = "Forced HDR peak",
-                                description = "Target peak in nits for the forced HDR output. Match this to your panel's real peak brightness (typical phone OLEDs: 400–800).",
+                                description = "Match your panel's real peak brightness.",
                                 range = 200..2000,
                                 step = 50,
                                 current = settings.forcedHdrPeakNits,
@@ -242,7 +242,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                         }
                         ToggleRow(
                             label = "HDR diagnostic overlay",
-                            description = "Show a small panel on the player listing source primaries, the output plan, the negotiated render-target transfer + peak, system HDR mode, and DV reshape state. For chasing OEM weirdness.",
+                            description = "Live pipeline readout on the player — source, plan, negotiated output, DV reshape.",
                             checked = settings.hdrDiagnosticOverlay,
                             onCheckedChange = { v -> mutate { it.copy(hdrDiagnosticOverlay = v) } },
                         )
@@ -596,8 +596,8 @@ private fun HardwareDecodingPicker(
     // The OFF enum case survives only for old persisted settings; anyone
     // who had it selected sees Auto behaviour via the picker below.
     val options = listOf(
-        Triple(HardwareDecodingMode.AUTO, "Auto", "Fastest path — MediaCodec owns the buffers. Use this unless you hit playback issues."),
-        Triple(HardwareDecodingMode.COPY, "Copy", "Decoded frames are copied through system memory. Slower but works around buggy zero-copy surfaces on some chipsets."),
+        Triple(HardwareDecodingMode.AUTO, "Auto", "Fastest path. Use this unless something breaks."),
+        Triple(HardwareDecodingMode.COPY, "Copy", "Slower, but works around buggy chipsets."),
     )
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         options.forEach { (mode, label, description) ->

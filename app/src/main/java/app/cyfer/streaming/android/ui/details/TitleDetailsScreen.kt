@@ -267,16 +267,12 @@ fun TitleDetailsScreen(
                     ),
                 )
 
-                // Tagline OR "Year · Runtime" — like desktop's synopsis-key
-                val synopsisKey = if (!item.tagline.isNullOrBlank()) item.tagline
-                else listOfNotNull(
-                    item.displayYear.takeIf { it.isNotEmpty() },
-                    item.runtimeFormatted.takeIf { it.isNotEmpty() },
-                ).joinToString(" · ")
-                if (synopsisKey.isNotBlank()) {
+                // Tagline only — the old "Year · Runtime" fallback just
+                // repeated the eyebrow (year) and stats row (runtime).
+                if (!item.tagline.isNullOrBlank()) {
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = synopsisKey,
+                        text = item.tagline,
                         color = CyferWhite,
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.Bold,
@@ -312,10 +308,12 @@ fun TitleDetailsScreen(
                     }
                     if (metaItems.isNotEmpty()) Spacer(modifier = Modifier.width(2.dp))
 
-                    val bestResolution = sourceSearch.streams
+                    // Resolution badge only once a real source reported
+                    // one — no fabricated "4K" placeholder while loading.
+                    sourceSearch.streams
                         .firstNotNullOfOrNull { it.quality.resolution }
-                        ?.label ?: if (isMovie) "4K" else "HD"
-                    SolidBadge(bestResolution)
+                        ?.label
+                        ?.let { SolidBadge(it) }
                     val tags = aggregateTechTags(sourceSearch.streams)
                     tags.videoLogos.forEach { TechLogoBadge(it) }
                     tags.audioLogos.forEach { TechLogoBadge(it) }
@@ -768,36 +766,26 @@ fun TitleDetailsScreen(
 }
 
 /**
- * Pill toggle for "Mark watched" / "Watched". Filled accent when the
- * title is watched, outlined otherwise. Sits beside the Play button.
+ * Watched toggle — a circular glass icon button matching the hero's
+ * watchlist button (Apple TV keeps secondary actions as quiet icon
+ * circles beside the white Play pill). Accent-filled when watched.
  */
 @Composable
 private fun MarkWatchedButton(watched: Boolean, onToggle: () -> Unit) {
-    Surface(
+    FilledIconButton(
         onClick = onToggle,
-        shape = RoundedCornerShape(22.dp),
-        color = if (watched) CyferAccent else CyferCardSurface,
-        border = if (watched) null else BorderStroke(1.dp, CyferCardSurfaceLight),
-        modifier = Modifier.height(42.dp),
+        shape = CircleShape,
+        colors = IconButtonDefaults.filledIconButtonColors(
+            containerColor = if (watched) CyferAccent else CyferCardSurface,
+            contentColor = if (watched) CyferBlack else CyferWhite,
+        ),
+        modifier = Modifier.size(42.dp),
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 18.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Icon(
-                imageVector = if (watched) Icons.Default.Check else Icons.Default.RemoveRedEye,
-                contentDescription = null,
-                tint = if (watched) CyferBlack else CyferWhite,
-                modifier = Modifier.size(18.dp),
-            )
-            Text(
-                text = if (watched) "Watched" else "Mark watched",
-                color = if (watched) CyferBlack else CyferWhite,
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Bold,
-            )
-        }
+        Icon(
+            imageVector = Icons.Default.Check,
+            contentDescription = if (watched) "Watched — tap to unwatch" else "Mark watched",
+            modifier = Modifier.size(20.dp),
+        )
     }
 }
 

@@ -921,27 +921,12 @@ private fun ControlsOverlay(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
+                // One quiet format badge next to the title (DV / HDR10 /
+                // HLG logo). Profile + reshape detail lives in the HDR
+                // diagnostic overlay — the chrome stays Apple TV-clean.
                 if (state.hdrVideo.active) {
                     Spacer(modifier = Modifier.width(8.dp))
                     HdrTitleBadge(state.hdrVideo)
-                    // DV profile chip — profile comes from the demuxer's
-                    // DV config record, so it shows on the HW path too.
-                    // Tells P7 users "you're getting HDR10".
-                    state.hdrVideo.dolbyVisionProfile?.let { _ ->
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Surface(
-                            shape = RoundedCornerShape(3.dp),
-                            color = androidx.compose.ui.graphics.Color(0xFF1976D2),
-                        ) {
-                            Text(
-                                text = state.hdrVideo.detailedLabel.uppercase(),
-                                color = Color.White,
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
-                            )
-                        }
-                    }
                 }
             }
             Spacer(modifier = Modifier.width(8.dp))
@@ -998,16 +983,14 @@ private fun ControlsOverlay(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Row(
-                    modifier = Modifier
-                        .weight(1f)
-                        .horizontalScroll(rememberScrollState()),
+                    modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    HdrDisplayChip(state.hdrDisplay)
-                    Spacer(Modifier.width(6.dp))
-                    // Verified HDR output — appears only when libmpv has
-                    // confirmed the chain (window→surface→compositor) is
-                    // actually delivering HDR pixels to the panel.
+                    // The single dynamic truth worth keeping in the
+                    // chrome: HDR output is live, and at what peak. The
+                    // static display-caps / hwdec / codec-name chips
+                    // moved to the diagnostic overlay — they never
+                    // change mid-session and just cluttered the chrome.
                     if (state.hdrPipelineActive) {
                         Surface(
                             shape = RoundedCornerShape(3.dp),
@@ -1018,17 +1001,14 @@ private fun ControlsOverlay(
                                 ?.let { " · ${it.toInt()} NIT" }
                                 .orEmpty()
                             Text(
-                                text = "HDR ACTIVE$luminanceTag",
+                                text = "HDR$luminanceTag",
                                 color = Color.Black,
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
                             )
                         }
-                        Spacer(Modifier.width(6.dp))
                     }
-                    state.hwdec?.let { CodecChip(it.uppercase()); Spacer(Modifier.width(6.dp)) }
-                    state.videoCodec?.takeIf { it.isNotBlank() }?.let { CodecChip(it.uppercase()) }
                 }
                 Spacer(modifier = Modifier.width(10.dp))
                 GlassIconButton(
@@ -1439,11 +1419,6 @@ private fun GlassIconButton(
 }
 
 @Composable
-private fun HdrDisplayChip(caps: HdrDisplayCapabilities) {
-    CodecChip("DISPLAY ${caps.shortLabel}")
-}
-
-@Composable
 private fun HdrTitleBadge(meta: HdrVideoMetadata) {
     val tag = hdrTitleTag(meta) ?: return
     TechLogoBadge(tag = tag, heightDp = 16)
@@ -1456,22 +1431,6 @@ private fun hdrTitleTag(meta: HdrVideoMetadata): TechTag? = when (meta.label) {
     "HLG" -> TechTag.HLG
     "HDR" -> TechTag.HDR
     else -> null
-}
-
-@Composable
-private fun CodecChip(text: String) {
-    Surface(
-        shape = RoundedCornerShape(3.dp),
-        color = Color.White.copy(alpha = 0.12f),
-    ) {
-        Text(
-            text = text,
-            color = Color.White.copy(alpha = 0.85f),
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
-        )
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

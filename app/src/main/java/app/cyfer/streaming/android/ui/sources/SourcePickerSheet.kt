@@ -666,17 +666,17 @@ private fun StreamRow(
                             .weight(1f)
                             .horizontalScroll(rememberScrollState()),
                     ) {
-                        // Compound pill: TORRENTS in orange + (optional)
-                        // attached debrid suffix in a darker tone. Single
-                        // pill visually so they read as a unit.
-                        TorrentsWithDebridPill(
-                            kind = kind,
-                            kindColor = kindColor,
-                            debridSuffix = debridSuffix,
+                        // Source identity — one quiet pill: a colour-coded
+                        // dot (orange torrents / blue addons / green
+                        // direct·downloaded) + provider name + optional
+                        // debrid suffix. Replaces the old solid-colour
+                        // TORRENTS/ADDONS block + separate name pill —
+                        // same information, Apple TV-quiet.
+                        SourceIdentityPill(
+                            dotColor = kindColor,
+                            label = if (source.isNotEmpty() && source != kind) source else kind,
+                            suffix = debridSuffix,
                         )
-                        if (source.isNotEmpty() && source != kind) {
-                            CyferTagPill(source, background = CyferCardSurfaceLight, foreground = CyferWhite)
-                        }
                         resolution?.let {
                             CyferTagPill(it, background = CyferBadgeBackground, foreground = CyferWhite)
                         }
@@ -816,42 +816,36 @@ private fun DownloadActionButton(
  * pill — no visual noise about "P2P" since that's the default.
  */
 @Composable
-private fun TorrentsWithDebridPill(
-    kind: String,
-    kindColor: Color,
-    debridSuffix: String,
+private fun SourceIdentityPill(
+    dotColor: Color,
+    label: String,
+    suffix: String,
 ) {
-    if (debridSuffix.isEmpty()) {
-        CyferTagPill(kind, background = kindColor, foreground = CyferBlack)
-        return
-    }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        // Left half — primary kind, square right edge so it docks into the suffix.
-        Surface(
-            color = kindColor,
-            shape = RoundedCornerShape(topStart = 3.dp, bottomStart = 3.dp, topEnd = 0.dp, bottomEnd = 0.dp),
+    Surface(color = CyferCardSurfaceLight, shape = RoundedCornerShape(3.dp)) {
+        Row(
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .background(dotColor, CircleShape),
+            )
             Text(
-                text = kind,
-                color = CyferBlack,
+                text = label,
+                color = CyferWhite,
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
             )
-        }
-        // Right half — the RD / TB / RD+TB tag, slightly darker tone so
-        // it reads as an attached badge rather than a separate pill.
-        Surface(
-            color = kindColor.copy(alpha = 0.55f),
-            shape = RoundedCornerShape(topStart = 0.dp, bottomStart = 0.dp, topEnd = 3.dp, bottomEnd = 3.dp),
-        ) {
-            Text(
-                text = debridSuffix,
-                color = CyferBlack,
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp),
-            )
+            if (suffix.isNotEmpty()) {
+                Text(
+                    text = suffix,
+                    color = CyferTextSecondary,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
         }
     }
 }
