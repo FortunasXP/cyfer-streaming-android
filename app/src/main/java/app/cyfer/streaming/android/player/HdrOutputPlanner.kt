@@ -46,7 +46,17 @@ fun planHdrOutput(
     display: HdrDisplayCapabilities,
     cfg: MpvPlayer.HdrPipelineConfig,
 ): HdrOutputPlan {
-    val sourceLabel = source.detailedLabel
+    // Be honest about what the DV path is actually doing: "reshape" only
+    // when frames carry RPUs (colormatrix=dolbyvision), otherwise we're
+    // rendering the base layer — fine for P8 (BL = real HDR10/HLG),
+    // visibly wrong for P5 (BL = IPTPQc2).
+    val dvNote = when {
+        source.dolbyVisionProfile == null -> null
+        source.dolbyVisionReshapeActive -> "reshape"
+        source.dolbyVisionP5BaseLayer -> "BL only — wrong colours!"
+        else -> "HDR10 BL"
+    }
+    val sourceLabel = source.detailedLabel + (dvNote?.let { " ($it)" } ?: "")
     val displayShort = display.shortLabel
 
     // 1 ── user override: emit HDR regardless of reported caps

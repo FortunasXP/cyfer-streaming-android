@@ -306,26 +306,21 @@ fun PlayerScreen(
         MpvPlayer.setHardwareDecoding(playerSettings.hardwareDecoding.mpvOption())
     }
     // Reactive HDR pipeline — flips libplacebo's tone-mapping, gamut
-    // mapping, SDR target peak, and DV handling as the user tweaks them
-    // in Settings. Re-fires applyHdrOptions() so the live render picks
-    // up the new curve without a reload.
+    // mapping, SDR target peak, and forced-HDR override as the user
+    // tweaks them in Settings. Re-fires applyHdrOptions() so the live
+    // render picks up the new curve without a reload.
     LaunchedEffect(
         playerSettings.toneMappingAlgorithm,
-        playerSettings.toneMappingMode,
         playerSettings.gamutMappingMode,
         playerSettings.sdrTargetPeakNits,
-        playerSettings.dolbyVisionMode,
         playerSettings.forceHdrOutput,
         playerSettings.forcedHdrPeakNits,
     ) {
         MpvPlayer.applyHdrConfig(
             app.cyfer.streaming.android.player.MpvPlayer.HdrPipelineConfig(
                 toneMapping = playerSettings.toneMappingAlgorithm.mpvOption(),
-                toneMappingMode = playerSettings.toneMappingMode.mpvOption(),
                 gamutMappingMode = playerSettings.gamutMappingMode.mpvOption(),
                 sdrTargetPeakNits = playerSettings.sdrTargetPeakNits,
-                dolbyVisionForceHdr10 = playerSettings.dolbyVisionMode ==
-                    app.cyfer.streaming.android.data.settings.DolbyVisionMode.HDR10,
                 forceHdrOutput = playerSettings.forceHdrOutput,
                 forcedHdrPeakNits = playerSettings.forcedHdrPeakNits,
             ),
@@ -530,6 +525,47 @@ fun PlayerScreen(
                 .padding(top = 14.dp),
         ) {
             StreamHealthToast(health = playbackState.streamHealth)
+        }
+
+        // One-shot Dolby Vision P5 warning. Hardware decode renders the
+        // P5 base layer without the RPU reshape (FFmpeg's mediacodec
+        // wrapper doesn't parse RPUs), and a P5 base layer is IPTPQc2 —
+        // i.e. visibly wrong colours. No player setting can fix it, so
+        // point the user at the actual remedy: an HDR10 / DV P8 source.
+        // Gated on position > 0 so colormatrix has settled (a reshaped
+        // SW-decoded file reports colormatrix=dolbyvision by then).
+        var dvWarningDismissed by remember(url) { mutableStateOf(false) }
+        val showDvWarning = !dvWarningDismissed &&
+            playbackState.hdrVideo.dolbyVisionP5BaseLayer &&
+            playbackState.position > 0 &&
+            playbackState.streamHealth == StreamHealth.Normal &&
+            !inPip && !isLoading
+        LaunchedEffect(showDvWarning) {
+            if (showDvWarning) {
+                delay(8000)
+                dvWarningDismissed = true
+            }
+        }
+        AnimatedVisibility(
+            visible = showDvWarning,
+            enter = fadeIn() + androidx.compose.animation.slideInVertically { -it },
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = 14.dp),
+        ) {
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = Color.Black.copy(alpha = 0.78f),
+            ) {
+                Text(
+                    text = "⚠ Dolby Vision P5 — colours can't be decoded correctly on this device. Pick an HDR10 or DV P8 source.",
+                    color = androidx.compose.ui.graphics.Color(0xFFFFB300),
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+            }
         }
 
         // Apple TV-style controls overlay (hidden in PiP and when locked)
@@ -880,8 +916,9 @@ private fun ControlsOverlay(
                 if (state.hdrVideo.active) {
                     Spacer(modifier = Modifier.width(8.dp))
                     HdrTitleBadge(state.hdrVideo)
-                    // DV profile chip — only when libplacebo confirmed
-                    // the DV RPU. Tells P7 users "you're getting HDR10".
+                    // DV profile chip — profile comes from the demuxer's
+                    // DV config record, so it shows on the HW path too.
+                    // Tells P7 users "you're getting HDR10".
                     state.hdrVideo.dolbyVisionProfile?.let { _ ->
                         Spacer(modifier = Modifier.width(6.dp))
                         Surface(
@@ -1253,17 +1290,21 @@ private fun classifySkipTarget(positionSec: Double, chapters: List<MpvChapter>):
 
 /**
  * Compact monospace overlay that lists the HDR pipeline state at a
- * glance — source primaries/transfer/peak, target prim/trc/peak/contrast,
- * tone-mapping algo, dovi profile, and the all-important
- * `hdr-display-detected` confirmation. Toggle via Settings → HDR.
+ * glance — source primaries/transfer/peak, the planner's decision, the
+ * render-target transfer + peak that libplacebo actually negotiated
+ * (`video-target-params`), and the DV reshape state. Toggle via
+ * Settings → HDR.
  */
 @Composable
 private fun HdrDiagnosticOverlay(state: MpvPlaybackState, modifier: Modifier = Modifier) {
     val hdr = state.hdrVideo
     val display = state.hdrDisplay
     val rows = buildList {
-        add("DISPLAY    " + display.shortLabel + if (state.hdrPipelineActive) " · ACTIVE" else " · sdr-out")
-        add("PEAK OUT   " + (state.targetLuminanceNits.takeIf { it > 0 }?.let { "${it.toInt()} nit" } ?: "—"))
+        add("DISPLAY    " + display.shortLabel + if (state.hdrPipelineActive) " · HDR OUT" else " · sdr-out")
+        // What the swapchain actually accepted — the ground truth the
+        // old hdr-display-detected property pretended to be.
+        add("TARGET     " + state.targetTransfer.ifBlank { "—" } +
+            (state.targetLuminanceNits.takeIf { it > 0 }?.let { " · ${it.toInt()} nit" } ?: ""))
         // The content-format × display-capability decision the planner
         // made for this file — the single most useful line here.
         if (state.outputPlanDescription.isNotBlank()) {
@@ -1291,7 +1332,12 @@ private fun HdrDiagnosticOverlay(state: MpvPlaybackState, modifier: Modifier = M
             "  CLL " + (hdr.maxCll?.toInt()?.toString() ?: "—") +
             "  FALL " + (hdr.maxFall?.toInt()?.toString() ?: "—"))
         hdr.dolbyVisionProfile?.let { p ->
-            add("DV         profile=$p" + (hdr.dolbyVisionLevel?.let { " level=$it" } ?: ""))
+            val reshape = when {
+                hdr.dolbyVisionReshapeActive -> "reshape=on"
+                hdr.dolbyVisionP5BaseLayer -> "reshape=OFF (P5 BL — wrong colours)"
+                else -> "reshape=off (HDR10 BL)"
+            }
+            add("DV         profile=$p" + (hdr.dolbyVisionLevel?.let { " level=$it" } ?: "") + " · " + reshape)
         }
         state.hwdec?.takeIf { it.isNotBlank() }?.let { add("HWDEC      $it") }
         state.videoCodec?.takeIf { it.isNotBlank() }?.let { add("CODEC      $it") }

@@ -96,23 +96,10 @@ fun ToneMappingAlgorithm.mpvOption(): String = when (this) {
     ToneMappingAlgorithm.CLIP -> "clip"
 }
 
-/**
- * libplacebo `tone-mapping-mode` — how the tone curve is applied across
- * channels.
- *  - [HYBRID] → luma + RGB blend (modern best practice, our default)
- *  - [RGB]    → per-channel
- *  - [LUMA]   → luminance only (preserves hue but desaturates highlights)
- *  - [MAX]    → max RGB driver
- */
-@Serializable
-enum class ToneMappingMode { HYBRID, RGB, LUMA, MAX }
-
-fun ToneMappingMode.mpvOption(): String = when (this) {
-    ToneMappingMode.HYBRID -> "hybrid"
-    ToneMappingMode.RGB -> "rgb"
-    ToneMappingMode.LUMA -> "luma"
-    ToneMappingMode.MAX -> "max"
-}
+// ToneMappingMode was removed: mpv dropped `tone-mapping-mode` in 0.37
+// (libplacebo now picks the hybrid behaviour automatically). The setting
+// was silently rejected by the bundled libmpv. Old persisted values are
+// skipped harmlessly via ignoreUnknownKeys.
 
 /** libplacebo `gamut-mapping-mode`. Default = Perceptual hue-preserving. */
 @Serializable
@@ -129,17 +116,14 @@ fun GamutMappingMode.mpvOption(): String = when (this) {
     GamutMappingMode.LINEAR -> "linear"
 }
 
-/**
- * How the player handles Dolby Vision metadata.
- *  - [AUTO]      → libplacebo applies the RPU reshape when DV side data
- *    is present (the default; profile 5/8 single-layer get full DV).
- *  - [FORCE_RPU] → same as AUTO today, reserved for future force-on.
- *  - [HDR10]     → strip DV RPU, render the HDR10 base layer only.
- *    Useful if the panel does its own DV tone mapping better than the
- *    libplacebo shader.
- */
-@Serializable
-enum class DolbyVisionMode { AUTO, FORCE_RPU, HDR10 }
+// DolbyVisionMode was removed: the "strip DV → HDR10" mode relied on a
+// `dovi_strip` FFmpeg option that doesn't exist (verified against
+// FFmpeg 8.1.1) — it never did anything. There is also no real choice
+// to offer on the current pipeline: the mediacodec wrapper decoder
+// doesn't parse DV RPUs, so hardware-decoded DV always renders the
+// base layer (P8 = genuine HDR10; P5 = wrong colours, warned in-player),
+// while the libdovi reshape applies only if frames come from the
+// software decoder.
 
 @Serializable
 data class AppSettings(
@@ -204,7 +188,6 @@ data class AppSettings(
     // pick programmatically when the user hasn't tweaked anything.
 
     val toneMappingAlgorithm: ToneMappingAlgorithm = ToneMappingAlgorithm.AUTO,
-    val toneMappingMode: ToneMappingMode = ToneMappingMode.HYBRID,
     val gamutMappingMode: GamutMappingMode = GamutMappingMode.PERCEPTUAL,
 
     /**
@@ -213,9 +196,6 @@ data class AppSettings(
      * before passing to mpv.
      */
     val sdrTargetPeakNits: Int = 203,
-
-    /** Dolby Vision handling — see [DolbyVisionMode]. */
-    val dolbyVisionMode: DolbyVisionMode = DolbyVisionMode.AUTO,
 
     /**
      * Force libmpv to output BT.2020/PQ pixels even when the OS doesn't
@@ -235,9 +215,10 @@ data class AppSettings(
 
     /**
      * Show the developer HDR diagnostic overlay on the player. Lists
-     * source primaries/transfer/peak, current target prim/trc/peak,
-     * tone-mapping algo, hdr-display-detected, target-luminance. Helps
-     * confirm the pipeline actually reached the panel.
+     * source primaries/transfer/peak, the output plan, the negotiated
+     * render-target transfer + peak (video-target-params), and the DV
+     * reshape state. Helps confirm the pipeline actually reached the
+     * panel.
      */
     val hdrDiagnosticOverlay: Boolean = false,
 )

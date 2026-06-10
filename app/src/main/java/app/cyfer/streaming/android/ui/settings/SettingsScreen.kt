@@ -188,18 +188,6 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                             onPick = { v -> mutate { it.copy(toneMappingAlgorithm = v) } },
                         )
                         EnumPickerRow(
-                            label = "Tone mapping mode",
-                            description = "Whether the tone curve is applied per-channel (RGB), luminance-only, or both (Hybrid).",
-                            options = listOf(
-                                app.cyfer.streaming.android.data.settings.ToneMappingMode.HYBRID to "Hybrid (recommended)",
-                                app.cyfer.streaming.android.data.settings.ToneMappingMode.RGB to "RGB",
-                                app.cyfer.streaming.android.data.settings.ToneMappingMode.LUMA to "Luma",
-                                app.cyfer.streaming.android.data.settings.ToneMappingMode.MAX to "Max",
-                            ),
-                            current = settings.toneMappingMode,
-                            onPick = { v -> mutate { it.copy(toneMappingMode = v) } },
-                        )
-                        EnumPickerRow(
                             label = "Gamut mapping",
                             description = "How wide-gamut HDR colour fits into the panel's smaller colour space. Perceptual preserves hue.",
                             options = listOf(
@@ -224,16 +212,16 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                             valueLabel = { "$it nits" },
                             onChange = { v -> mutate { it.copy(sdrTargetPeakNits = v) } },
                         )
-                        EnumPickerRow(
-                            label = "Dolby Vision",
-                            description = "Auto applies the libdovi RPU reshape (profile 5 / 8). HDR10 strips DV metadata and renders the base layer — useful if your panel's own DV processor is better than libplacebo's shader.",
-                            options = listOf(
-                                app.cyfer.streaming.android.data.settings.DolbyVisionMode.AUTO to "Auto (recommended)",
-                                app.cyfer.streaming.android.data.settings.DolbyVisionMode.FORCE_RPU to "Force RPU reshape",
-                                app.cyfer.streaming.android.data.settings.DolbyVisionMode.HDR10 to "Strip DV → HDR10",
-                            ),
-                            current = settings.dolbyVisionMode,
-                            onPick = { v -> mutate { it.copy(dolbyVisionMode = v) } },
+                        // Dolby Vision is not user-configurable on this
+                        // pipeline: hardware decoding renders the base
+                        // layer (P8 = genuine HDR10/HLG), and the libdovi
+                        // reshape kicks in automatically whenever frames
+                        // carry RPU metadata. The old Auto/Strip picker
+                        // controlled an FFmpeg option that doesn't exist.
+                        Text(
+                            text = "Dolby Vision: profile 8 plays as its HDR10/HLG base layer (that's what the hardware decoder outputs). Profile 5 has no compatible base layer — the player warns and you should prefer an HDR10 or P8 source.",
+                            color = CyferTextSecondary,
+                            style = MaterialTheme.typography.bodySmall,
                         )
                         ToggleRow(
                             label = "Force HDR output",
@@ -254,7 +242,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                         }
                         ToggleRow(
                             label = "HDR diagnostic overlay",
-                            description = "Show a small panel on the player listing source primaries, target peak, tone-mapping algo, system HDR mode, and whether the display reported HDR back. For chasing OEM weirdness.",
+                            description = "Show a small panel on the player listing source primaries, the output plan, the negotiated render-target transfer + peak, system HDR mode, and DV reshape state. For chasing OEM weirdness.",
                             checked = settings.hdrDiagnosticOverlay,
                             onCheckedChange = { v -> mutate { it.copy(hdrDiagnosticOverlay = v) } },
                         )

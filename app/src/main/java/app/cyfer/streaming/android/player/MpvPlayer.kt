@@ -72,12 +72,16 @@ data class MpvPlaybackState(
     /** Seconds of demuxer cache available ahead of `position`. Used to
      *  render the buffered range on the scrubber. */
     val demuxerCacheSeconds: Double = 0.0,
-    /** True when libmpv reports the output is currently in HDR mode —
-     *  i.e. our window colorMode + SurfaceView 10-bit format + Android
-     *  compositor all said yes. The most reliable signal that HDR is
-     *  actually reaching the panel rather than getting clamped silently. */
+    /** True when libmpv's `video-target-params` reports an HDR transfer
+     *  (PQ/HLG) on the actual render target — i.e. libplacebo negotiated
+     *  an HDR swapchain with EGL/SurfaceFlinger instead of silently
+     *  falling back to an SDR one. The most reliable signal that HDR is
+     *  actually leaving the renderer rather than getting clamped. */
     val hdrPipelineActive: Boolean = false,
-    /** Effective target peak in nits as reported by libmpv. */
+    /** Transfer function of the render target ("pq", "hlg", "bt.1886",
+     *  …) from `video-target-params`. Empty until the VO configures. */
+    val targetTransfer: String = "",
+    /** Effective target peak in nits (`video-target-params/max-luma`). */
     val targetLuminanceNits: Double = 0.0,
     /** Stream health surfaced by the PlayerScreen watchdogs. */
     val streamHealth: StreamHealth = StreamHealth.Normal,
@@ -167,7 +171,7 @@ object MpvPlayer : MPV.EventObserver {
         // force the 10-bit (or FP16) config found by the probe so the
         // framebuffer can actually carry PQ — without this the HDR
         // signal is quantised to 8 bits before it ever reaches the
-        // compositor, and hdr-display-detected never flips true.
+        // compositor and the target params never report PQ.
         if (hdrCaps.hdrCapable) {
             egl.preferredHdrConfigId?.let { cfgId ->
                 Log.i(TAG, "Using HDR-capable EGLConfig id=$cfgId")
@@ -214,10 +218,8 @@ object MpvPlayer : MPV.EventObserver {
      *  [applyHdrOptions] used to set hard-coded. */
     data class HdrPipelineConfig(
         val toneMapping: String = "bt.2390",
-        val toneMappingMode: String = "hybrid",
         val gamutMappingMode: String = "perceptual",
         val sdrTargetPeakNits: Int = 203,
-        val dolbyVisionForceHdr10: Boolean = false,
         /** Force BT.2020/PQ output regardless of what
          *  [HdrDisplayCapabilities.hdrCapable] reports. Override path
          *  for devices whose OS advertises SDR but whose
@@ -251,16 +253,20 @@ object MpvPlayer : MPV.EventObserver {
         setOption("hdr-compute-peak", "auto")
         setOption("hdr-peak-percentile", "99.995")
         setOption("tone-mapping", cfg.toneMapping)
-        setOption("tone-mapping-mode", cfg.toneMappingMode)
         setOption("gamut-mapping-mode", cfg.gamutMappingMode)
-
-        // Dolby Vision handling: when the user picks "HDR10 only", strip
-        // the RPU so libplacebo skips the reshape and renders the base
-        // layer with the standard HDR10 tone curve. Useful on panels
-        // whose own DV processor outperforms libplacebo's shader.
-        // Otherwise the RPU reshape is applied for EVERY output target —
-        // even SDR — because the reshaped signal tone-maps better.
-        setOption("vd-lavc-o", if (cfg.dolbyVisionForceHdr10) "strict=-2,dovi_strip=1" else "")
+        // Recover highlight detail crushed by the tone curve — mpv's
+        // high-quality profile value. Mostly benefits HDR→SDR output;
+        // a no-op when the target is genuine PQ/HLG.
+        setOption("hdr-contrast-recovery", "0.30")
+        // NOTE deliberately absent options (verified against the bundled
+        // libmpv, mpv v0.41-master):
+        //  - tone-mapping-mode: removed upstream in mpv 0.37; libplacebo
+        //    picks the hybrid behaviour automatically now.
+        //  - vd-lavc-o=dovi_strip: never existed in FFmpeg — the old
+        //    "strip DV → HDR10" mode was a silent no-op. On the
+        //    mediacodec path the base layer is all we get anyway (the
+        //    HW wrapper decoder doesn't parse RPUs), so P8 content
+        //    already renders as plain HDR10.
 
         applyOutputPlan(hdrCaps)
     }
@@ -360,6 +366,9 @@ object MpvPlayer : MPV.EventObserver {
                 chapters = emptyList(),
                 demuxerCacheSeconds = 0.0,
                 outputPlanDescription = "",
+                hdrPipelineActive = false,
+                targetTransfer = "",
+                targetLuminanceNits = 0.0,
             )
         }
         // Drop the previous file's output plan so the next file's
@@ -563,7 +572,15 @@ object MpvPlayer : MPV.EventObserver {
     // ── MPV.EventObserver callbacks ─────────────────────────────
 
     override fun eventProperty(property: String) {
-        // no-value property change
+        // No-value change = property became unavailable. For the target
+        // params that means the VO tore its swapchain down (surface
+        // destroyed / vo=null during lock) — drop the HDR-active flag so
+        // the UI doesn't keep claiming HDR output with no output at all.
+        if (property == "video-target-params") {
+            _state.update {
+                it.copy(hdrPipelineActive = false, targetTransfer = "", targetLuminanceNits = 0.0)
+            }
+        }
     }
 
     override fun eventProperty(property: String, value: Long) {
@@ -580,7 +597,6 @@ object MpvPlayer : MPV.EventObserver {
             "time-pos" -> _state.update { it.copy(position = value) }
             "duration" -> _state.update { it.copy(duration = value) }
             "demuxer-cache-time" -> _state.update { it.copy(demuxerCacheSeconds = value) }
-            "target-luminance" -> _state.update { it.copy(targetLuminanceNits = value) }
             "video-params/sig-peak" -> updateHdrVideo { it.copy(signalPeak = value) }
             "video-params/max-cll" -> updateHdrVideo { it.copy(maxCll = value) }
             "video-params/max-fall" -> updateHdrVideo { it.copy(maxFall = value) }
@@ -591,7 +607,6 @@ object MpvPlayer : MPV.EventObserver {
         when (property) {
             "pause" -> _state.update { it.copy(paused = value, playing = !value) }
             "idle-active" -> _state.update { it.copy(idle = value) }
-            "hdr-display-detected" -> _state.update { it.copy(hdrPipelineActive = value) }
         }
     }
 
@@ -608,8 +623,8 @@ object MpvPlayer : MPV.EventObserver {
     }
 
     override fun eventProperty(property: String, value: MPVNode) {
-        if (property == "video-params") {
-            updateHdrVideo {
+        when (property) {
+            "video-params" -> updateHdrVideo {
                 it.copy(
                     primaries = value["primaries"]?.asString() ?: it.primaries,
                     transfer = value["gamma"]?.asString() ?: it.transfer,
@@ -619,6 +634,21 @@ object MpvPlayer : MPV.EventObserver {
                     maxCll = value["max-cll"]?.asDouble() ?: it.maxCll,
                     maxFall = value["max-fall"]?.asDouble() ?: it.maxFall,
                 )
+            }
+            "video-target-params" -> {
+                // mpv historically calls the transfer "gamma"; newer
+                // builds also expose "transfer" — read either.
+                val transfer = (value["gamma"]?.asString()
+                    ?: value["transfer"]?.asString()).orEmpty().lowercase()
+                val peakNits = value["max-luma"]?.asDouble() ?: 0.0
+                val hdrOut = transfer == "pq" || transfer == "hlg"
+                _state.update {
+                    it.copy(
+                        hdrPipelineActive = hdrOut,
+                        targetTransfer = transfer,
+                        targetLuminanceNits = peakNits,
+                    )
+                }
             }
         }
     }
@@ -750,12 +780,14 @@ object MpvPlayer : MPV.EventObserver {
             // the scrubber. Updates roughly every second while data is
             // arriving; sits flat when the cache is full.
             mpv.observeProperty("demuxer-cache-time", MPV.mpvFormat.MPV_FORMAT_DOUBLE)
-            // HDR pipeline diagnostics: hdr-display-detected flips true
-            // when libmpv has confirmed the output is actually HDR (not
-            // tone-mapped down silently by the compositor). target-
-            // luminance reports the effective output peak in nits.
-            mpv.observeProperty("hdr-display-detected", MPV.mpvFormat.MPV_FORMAT_FLAG)
-            mpv.observeProperty("target-luminance", MPV.mpvFormat.MPV_FORMAT_DOUBLE)
+            // HDR pipeline verification: video-target-params reports the
+            // colour params of the ACTUAL render target libplacebo
+            // negotiated with EGL/SurfaceFlinger — transfer pq/hlg means
+            // HDR pixels are genuinely leaving the renderer; max-luma is
+            // the effective output peak in nits. (The previously observed
+            // hdr-display-detected / target-luminance properties do not
+            // exist in any mpv — verified against the bundled binary.)
+            mpv.observeProperty("video-target-params", MPV.mpvFormat.MPV_FORMAT_NODE)
         } catch (e: Exception) {
             Log.w(TAG, "Failed to observe some properties", e)
         }

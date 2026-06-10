@@ -86,6 +86,27 @@ data class HdrVideoMetadata(
             (maxCll ?: 0.0) > 0.0 ||
             (maxFall ?: 0.0) > 0.0
 
+    /**
+     * True when libplacebo will actually apply the DV RPU reshape. mpv
+     * flips `video-params/colormatrix` to "dolbyvision" only when the
+     * decoded frames carry RPU metadata — which on this pipeline means
+     * the software decoder produced them. Hardware mediacodec frames
+     * never carry RPUs (FFmpeg's wrapper doesn't parse them), so DV
+     * files decoded in hardware keep colormatrix=bt.2020-ncl and render
+     * the base layer only.
+     */
+    val dolbyVisionReshapeActive: Boolean
+        get() = (colorMatrix ?: "").lowercase().contains("dolbyvision")
+
+    /**
+     * DV profile 5 decoding without the reshape: the P5 base layer is
+     * IPTPQc2-encoded, so without the RPU pass the colours are wrong
+     * (the classic green/purple tint). Worth a user-facing warning —
+     * the fix is picking an HDR10 or DV P8 source instead.
+     */
+    val dolbyVisionP5BaseLayer: Boolean
+        get() = dolbyVisionProfile == 5 && !dolbyVisionReshapeActive
+
     val label: String
         get() = when {
             haystack.contains("dolby") || dolbyVisionProfile != null -> "Dolby Vision"

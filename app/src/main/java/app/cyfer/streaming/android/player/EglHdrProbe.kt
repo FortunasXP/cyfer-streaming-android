@@ -16,7 +16,7 @@ import android.util.Log
  *  2. The `EGL_EXT_gl_colorspace_bt2020_pq` extension. When present,
  *     libplacebo (vo=gpu-next + target-colorspace-hint=yes) asks EGL to
  *     tag the swapchain BT.2020-PQ, SurfaceFlinger composites it as
- *     HDR, and mpv's `hdr-display-detected` flips true. When absent the
+ *     HDR, and `video-target-params` reports a PQ target. When absent the
  *     GL stack simply cannot signal HDR — the vendor blobs are the
  *     bottleneck, not our pipeline — and the honest move is to say so
  *     in the diagnostic instead of letting the user chase settings.
