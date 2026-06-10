@@ -66,6 +66,11 @@ fun BrowseScreen(
 
     // ── Discover grid state (paginated) ─────────────────────────────
     val items = remember(media, sort, selectedGenre) { mutableStateListOf<TmdbItem>() }
+    // TMDb repeats titles across page boundaries (popularity shifts
+    // between fetches), and the grid keys on the id — appending a
+    // repeat crashes the LazyGrid with "Key X was already used". Track
+    // seen ids and only append first occurrences.
+    val seenIds = remember(media, sort, selectedGenre) { HashSet<Int>() }
     var page by remember(media, sort, selectedGenre) { mutableIntStateOf(0) }
     var totalPages by remember(media, sort, selectedGenre) { mutableIntStateOf(Int.MAX_VALUE) }
     var loading by remember(media, sort, selectedGenre) { mutableStateOf(false) }
@@ -80,7 +85,7 @@ fun BrowseScreen(
             } else {
                 TmdbRepository.discoverTv(next, selectedGenre, year = null, sortBy = sort.tmdb)
             }
-            items += resp.results
+            items += resp.results.filter { seenIds.add(it.id) }
             page = resp.page
             totalPages = resp.total_pages.takeIf { it > 0 } ?: page
         } catch (e: Exception) {

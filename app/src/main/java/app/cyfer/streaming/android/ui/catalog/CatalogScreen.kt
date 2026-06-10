@@ -85,6 +85,10 @@ fun CatalogScreen(
     BackHandler { onBack() }
 
     val items = remember(source) { mutableStateListOf<TmdbItem>() }
+    // TMDb trending/discover repeat titles across page boundaries and
+    // the grid keys on the id — a repeated append crashes the LazyGrid
+    // with "Key X was already used". Only append first occurrences.
+    val seenIds = remember(source) { HashSet<Int>() }
     var page by remember(source) { mutableIntStateOf(0) }
     var totalPages by remember(source) { mutableIntStateOf(Int.MAX_VALUE) }
     var loading by remember(source) { mutableStateOf(false) }
@@ -108,7 +112,7 @@ fun CatalogScreen(
                     }
                 }
             }
-            items += resp.results
+            items += resp.results.filter { seenIds.add(it.id) }
             page = resp.page
             totalPages = resp.total_pages.takeIf { it > 0 } ?: page
         } catch (e: Exception) {
