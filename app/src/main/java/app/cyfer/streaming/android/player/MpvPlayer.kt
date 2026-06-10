@@ -304,14 +304,28 @@ object MpvPlayer : MPV.EventObserver {
 
     fun attachSurface(surface: Surface) {
         if (!initialized) return
-        runCatching { mpv.attachSurface(surface) }
-            .onFailure { Log.w(TAG, "Failed to attach MPV surface", it) }
+        runCatching {
+            mpv.attachSurface(surface)
+            // Rebuild the video output on the new surface. When the phone
+            // locks, surfaceDestroyed tears the EGL context down; a bare
+            // re-attach on unlock leaves the VO null and the video stays
+            // black. Re-asserting vo=gpu-next forces libplacebo to
+            // recreate its swapchain against the fresh surface. This is
+            // the canonical mpv-android resume fix.
+            mpv.setOptionString("vo", "gpu-next")
+            mpv.setOptionString("force-window", "yes")
+        }.onFailure { Log.w(TAG, "Failed to attach MPV surface", it) }
     }
 
     fun detachSurface() {
         if (!initialized) return
-        runCatching { mpv.detachSurface() }
-            .onFailure { Log.w(TAG, "Failed to detach MPV surface", it) }
+        runCatching {
+            // Drop the video output BEFORE releasing the surface so mpv
+            // tears its swapchain down cleanly instead of rendering into
+            // a dead window (which is what leaves it wedged on resume).
+            mpv.setOptionString("vo", "null")
+            mpv.detachSurface()
+        }.onFailure { Log.w(TAG, "Failed to detach MPV surface", it) }
     }
 
     fun setForceWindow(enabled: Boolean) {

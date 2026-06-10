@@ -54,8 +54,10 @@ fun MpvPlayerView(
                             // it: if the platform exposes the API we set
                             // it here on the Java surface too.
                             tagSurfaceColorSpace(holder.surface, hdrCaps)
+                            // attachSurface re-asserts vo=gpu-next +
+                            // force-window so the video output rebuilds
+                            // cleanly on lock→unlock surface recreation.
                             MpvPlayer.attachSurface(holder.surface)
-                            MpvPlayer.setForceWindow(true)
                         }
 
                         override fun surfaceChanged(
@@ -68,7 +70,8 @@ fun MpvPlayerView(
                         }
 
                         override fun surfaceDestroyed(holder: SurfaceHolder) {
-                            MpvPlayer.setForceWindow(false)
+                            // detachSurface drops vo=null first so mpv
+                            // tears the swapchain down cleanly.
                             MpvPlayer.detachSurface()
                         }
                     })
