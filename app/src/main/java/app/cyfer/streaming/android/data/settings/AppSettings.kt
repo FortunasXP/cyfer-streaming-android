@@ -66,7 +66,10 @@ enum class HardwareDecodingMode { AUTO, COPY, OFF }
 fun HardwareDecodingMode.mpvOption(): String = when (this) {
     HardwareDecodingMode.AUTO -> "mediacodec"
     HardwareDecodingMode.COPY -> "mediacodec-copy"
-    HardwareDecodingMode.OFF -> "no"
+    // Software decoding was removed by design (unwatchable for 4K HEVC
+    // on phone SoCs). OFF survives only as a legacy persisted value and
+    // now behaves like AUTO.
+    HardwareDecodingMode.OFF -> "mediacodec"
 }
 
 /**

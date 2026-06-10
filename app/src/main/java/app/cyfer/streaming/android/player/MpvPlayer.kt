@@ -48,7 +48,7 @@ enum class StreamHealth {
     Stalled,                // Cache at 0 for too long — recovery imminent
     Recovering,             // Reload in flight
     HardwareCopyFallback,   // mediacodec failed; trying mediacodec-copy
-    SoftwareFallback,       // both HW modes failed; last-resort SW decode
+    DecoderFailed,          // both HW modes failed — no SW fallback by design
 }
 
 data class MpvPlaybackState(
@@ -85,6 +85,10 @@ data class MpvPlaybackState(
      *  "DV P8.1 → PQ out (600 nit) · display HDR10/HLG". Empty until
      *  the first plan is computed. */
     val outputPlanDescription: String = "",
+    /** EGL probe summary — framebuffer depth + PQ colorspace extension
+     *  availability, e.g. "10bit cfg#34 · pq ext yes". Tells us whether
+     *  the GL driver can physically deliver HDR to the compositor. */
+    val eglSummary: String = "",
 )
 
 /**
@@ -112,13 +116,18 @@ object MpvPlayer : MPV.EventObserver {
         if (initialized) return
         try {
             val hdrCaps = HdrDisplayDetector.detect(context)
-            _state.update { it.copy(hdrDisplay = hdrCaps) }
+            // Probe the EGL stack before mpv creates its context — tells
+            // us whether the GL driver offers a 10-bit framebuffer and
+            // the BT.2020-PQ colorspace extension (both required for the
+            // panel to actually receive HDR pixels from GL).
+            val egl = EglHdrProbe.probe()
+            _state.update { it.copy(hdrDisplay = hdrCaps, eglSummary = egl.summary) }
             mpv.create(context)
-            applyBaseOptions(hdrCaps)
+            applyBaseOptions(hdrCaps, egl)
             mpv.addObserver(this)
             mpv.init()
             initialized = true
-            Log.i(TAG, "MPV initialized successfully; display=${hdrCaps.label}")
+            Log.i(TAG, "MPV initialized successfully; display=${hdrCaps.label}; egl=${egl.summary}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize MPV", e)
         }
@@ -145,7 +154,7 @@ object MpvPlayer : MPV.EventObserver {
         return caps
     }
 
-    private fun applyBaseOptions(hdrCaps: HdrDisplayCapabilities) {
+    private fun applyBaseOptions(hdrCaps: HdrDisplayCapabilities, egl: EglHdrProbe.Result) {
         // ── Renderer ────────────────────────────────────────────────
         // gpu-next is mpv's libplacebo-based renderer: much better HDR
         // pipeline, perceptual gamut mapping, hybrid tone-mapping, and
@@ -154,12 +163,25 @@ object MpvPlayer : MPV.EventObserver {
         setOption("vo", "gpu-next")
         setOption("gpu-context", "android")
         setOption("gpu-api", "opengl")
+        // mpv defaults to an 8-bit EGLConfig. On an HDR-capable panel,
+        // force the 10-bit (or FP16) config found by the probe so the
+        // framebuffer can actually carry PQ — without this the HDR
+        // signal is quantised to 8 bits before it ever reaches the
+        // compositor, and hdr-display-detected never flips true.
+        if (hdrCaps.hdrCapable) {
+            egl.preferredHdrConfigId?.let { cfgId ->
+                Log.i(TAG, "Using HDR-capable EGLConfig id=$cfgId")
+                setOption("egl-config-id", cfgId.toString())
+            }
+        }
         // Honour any user override applied via setHardwareDecoding before
         // initialize(); falls back to the mediacodec default otherwise.
         setOption("hwdec", currentHwdec)
-        // If mediacodec chokes on a 10-bit HEVC or AV1, swap to software
-        // automatically instead of black-screening the user.
-        setOption("vd-lavc-software-fallback", "1")
+        // Never silently fall back to software decoding — on phone SoCs
+        // software 4K HEVC is unplayable and just cooks the battery. The
+        // watchdog cascade tries mediacodec → mediacodec-copy and then
+        // reports failure honestly instead.
+        setOption("vd-lavc-software-fallback", "no")
         setOption("ao", "audiotrack")
         setOption("input-default-bindings", "yes")
         setOption("keep-open", "yes")
@@ -370,20 +392,14 @@ object MpvPlayer : MPV.EventObserver {
     }
 
     /**
-     * Force the software decoder. Used by the first-frame watchdog ONLY
-     * as a last-last resort, after both `mediacodec` and `mediacodec-copy`
-     * failed to produce a frame. On older SoCs software HEVC at 4K is
-     * essentially unplayable, so we burn 24 s of timeout budget before
-     * resorting to this.
+     * Both hardware decode modes failed to produce a frame. There is no
+     * software fallback by design — SW 4K HEVC on a phone SoC is
+     * unplayable and just cooks the battery — so surface the failure
+     * honestly and let the user pick a different source.
      */
-    fun forceSoftwareDecode() {
-        if (!initialized) return
-        Log.i(TAG, "Forcing software decoder (last resort)")
-        currentHwdec = "no"
-        setOption("hwdec", "no")
-        _state.update { it.copy(streamHealth = StreamHealth.SoftwareFallback) }
-        // Reload so the change actually takes effect on the in-flight file.
-        currentUrl?.let { mpv.command("loadfile", it) }
+    fun markDecoderFailed() {
+        Log.w(TAG, "Hardware decoder failed in both mediacodec and mediacodec-copy modes")
+        _state.update { it.copy(streamHealth = StreamHealth.DecoderFailed) }
     }
 
     /** Clear a transient stream-health badge once we're back to normal. */

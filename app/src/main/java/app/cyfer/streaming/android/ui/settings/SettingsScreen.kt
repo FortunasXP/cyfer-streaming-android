@@ -603,10 +603,13 @@ private fun HardwareDecodingPicker(
     current: HardwareDecodingMode,
     onPick: (HardwareDecodingMode) -> Unit,
 ) {
+    // Software decoding was removed by design — phone SoCs can't SW-decode
+    // 4K HEVC at watchable speed, so offering it just produces complaints.
+    // The OFF enum case survives only for old persisted settings; anyone
+    // who had it selected sees Auto behaviour via the picker below.
     val options = listOf(
         Triple(HardwareDecodingMode.AUTO, "Auto", "Fastest path — MediaCodec owns the buffers. Use this unless you hit playback issues."),
         Triple(HardwareDecodingMode.COPY, "Copy", "Decoded frames are copied through system memory. Slower but works around buggy zero-copy surfaces on some chipsets."),
-        Triple(HardwareDecodingMode.OFF, "Software only", "Pure CPU decoding. Highest compatibility, highest battery drain — last-resort fallback."),
     )
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         options.forEach { (mode, label, description) ->
