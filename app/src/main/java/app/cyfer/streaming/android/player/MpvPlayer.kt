@@ -158,6 +158,13 @@ object MpvPlayer : MPV.EventObserver {
         return caps
     }
 
+    /** Live HDR/SDR headroom push from the Android 14+ display listener.
+     *  Only touches the diagnostic state — the output plan doesn't key
+     *  off the ratio, so no option churn. */
+    fun updateHdrSdrRatio(ratio: Float) {
+        _state.update { it.copy(hdrDisplay = it.hdrDisplay.copy(hdrSdrRatio = ratio)) }
+    }
+
     private fun applyBaseOptions(hdrCaps: HdrDisplayCapabilities, egl: EglHdrProbe.Result) {
         // ── Renderer ────────────────────────────────────────────────
         // gpu-next is mpv's libplacebo-based renderer: much better HDR

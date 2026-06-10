@@ -237,8 +237,16 @@ fun PlayerScreen(
         val original = activity?.requestedOrientation
         val hdrCaps = MpvPlayer.refreshHdrCapabilities(context)
         val restoreHdrMode = activity?.let { HdrDisplayDetector.applyHdrWindowMode(it, hdrCaps) }
+        // Track the compositor's HDR headroom live (A14+). The detect()
+        // snapshot is taken before any HDR frame exists, so it always
+        // reads 1.00x — the listener catches SurfaceFlinger raising the
+        // ratio once our PQ output actually starts being displayed.
+        val stopHdrRatio = HdrDisplayDetector.listenHdrSdrRatio(context) { ratio ->
+            MpvPlayer.updateHdrSdrRatio(ratio)
+        }
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         onDispose {
+            stopHdrRatio?.invoke()
             restoreHdrMode?.invoke()
             if (original != null) activity.requestedOrientation = original
             else activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT

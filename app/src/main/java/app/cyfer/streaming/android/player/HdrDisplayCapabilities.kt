@@ -126,11 +126,17 @@ data class HdrVideoMetadata(
         get() {
             val profile = dolbyVisionProfile
             if (profile != null) {
-                val level = dolbyVisionLevel
                 val tag = when (profile) {
                     5 -> "P5"
                     7 -> "P7→HDR10"
-                    8 -> if (level == 4) "P8.4" else "P8.1"
+                    // P8 sub-flavour: mpv's `dolby-vision-level` is the
+                    // bitstream complexity level (1–13), NOT the
+                    // bl_signal_compatibility_id — a 1080p P8.1 file is
+                    // level 4 and must not be labelled P8.4. The real
+                    // tell is the base layer's transfer: 8.4 = HLG BL.
+                    8 -> if ((transfer ?: "").lowercase().let {
+                        it.contains("hlg") || it.contains("arib-std-b67")
+                    }) "P8.4" else "P8.1"
                     else -> "P$profile"
                 }
                 return "DV $tag"
@@ -222,6 +228,30 @@ object HdrDisplayDetector {
             (m.invoke(display) as? Float)?.takeIf { it.isFinite() }
         }.getOrNull()
         return mode to ratio
+    }
+
+    /**
+     * Live HDR/SDR headroom updates (Android 14+). The ratio is
+     * SurfaceFlinger's actual grant — 1.0 means our window is being
+     * composited at SDR brightness; >1.0 means HDR pixels really are
+     * being displayed brighter than SDR white. It typically sits at 1.0
+     * until HDR content hits the screen, which is why the launch-time
+     * snapshot in [detect] reads as "no HDR" even on a working pipeline.
+     * Returns an unregister lambda, or null when the API/display is
+     * unavailable.
+     */
+    fun listenHdrSdrRatio(context: Context, onRatio: (Float) -> Unit): (() -> Unit)? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return null
+        val display = context.displayCompat() ?: return null
+        return runCatching {
+            if (!display.isHdrSdrRatioAvailable) return null
+            val listener = java.util.function.Consumer<Display> { d ->
+                onRatio(d.hdrSdrRatio)
+            }
+            display.registerHdrSdrRatioChangedListener(context.mainExecutor, listener)
+            onRatio(display.hdrSdrRatio)
+            return@runCatching { display.unregisterHdrSdrRatioChangedListener(listener) }
+        }.getOrNull()
     }
 
     fun applyHdrWindowMode(activity: Activity, caps: HdrDisplayCapabilities): (() -> Unit)? {
