@@ -315,6 +315,10 @@ object MpvPlayer : MPV.EventObserver {
             .onFailure { Log.w(TAG, "MPV option rejected: $name=$value (${it.message})") }
     }
 
+    /** Video track id stashed by [detachSurface] so [attachSurface] can
+     *  re-select it (which is what forces the decoder rebuild). */
+    @Volatile private var savedVidForDetach: String? = null
+
     fun attachSurface(surface: Surface) {
         if (!initialized) return
         runCatching {
@@ -327,15 +331,35 @@ object MpvPlayer : MPV.EventObserver {
             // the canonical mpv-android resume fix.
             mpv.setOptionString("vo", "gpu-next")
             mpv.setOptionString("force-window", "yes")
+            // Restore the video track that detachSurface() released.
+            // Re-selecting it makes vd_lavc open a FRESH mediacodec
+            // decoder bound to the new VO's image interop — the VO cycle
+            // alone is not enough: the old decoder stays wired to the
+            // torn-down GL context's dead surface and never produces a
+            // visible frame again (black video, audio fine).
+            savedVidForDetach?.let { vid ->
+                savedVidForDetach = null
+                mpv.setPropertyString("vid", vid)
+            }
         }.onFailure { Log.w(TAG, "Failed to attach MPV surface", it) }
     }
 
     fun detachSurface() {
         if (!initialized) return
         runCatching {
-            // Drop the video output BEFORE releasing the surface so mpv
-            // tears its swapchain down cleanly instead of rendering into
-            // a dead window (which is what leaves it wedged on resume).
+            // Release the video DECODER before the VO. Zero-copy
+            // mediacodec frames live in an AImageReader interop owned by
+            // the VO's GL context; tearing the VO down under a live
+            // decoder leaves the decoder bound to a dead surface it can
+            // never recover from. vid=no closes it cleanly — audio keeps
+            // playing while locked (and we stop wasting battery decoding
+            // video nobody can see) — and attachSurface() re-selects the
+            // track so a fresh decoder binds to the fresh interop.
+            val currentVid = runCatching { mpv.getPropertyString("vid") }.getOrNull()
+            savedVidForDetach = currentVid?.takeIf { it.isNotBlank() && it != "no" } ?: "auto"
+            mpv.setPropertyString("vid", "no")
+            // Then drop the video output so mpv tears its swapchain down
+            // cleanly instead of rendering into a dead window.
             mpv.setOptionString("vo", "null")
             mpv.detachSurface()
         }.onFailure { Log.w(TAG, "Failed to detach MPV surface", it) }
@@ -565,7 +589,11 @@ object MpvPlayer : MPV.EventObserver {
     fun stop() {
         if (!initialized) return
         mpv.command("stop")
-        _state.update { MpvPlaybackState(hdrDisplay = it.hdrDisplay) }
+        // Keep the process-lifetime facts (display caps + EGL probe)
+        // across the reset — wiping eglSummary here is why the EGL row
+        // used to vanish from the diagnostic overlay after the first
+        // playback ended.
+        _state.update { MpvPlaybackState(hdrDisplay = it.hdrDisplay, eglSummary = it.eglSummary) }
     }
 
     fun destroy() {
@@ -573,7 +601,7 @@ object MpvPlayer : MPV.EventObserver {
         mpv.removeObserver(this)
         mpv.destroy()
         initialized = false
-        _state.update { MpvPlaybackState(hdrDisplay = it.hdrDisplay) }
+        _state.update { MpvPlaybackState(hdrDisplay = it.hdrDisplay, eglSummary = it.eglSummary) }
     }
 
     // ── MPV.EventObserver callbacks ─────────────────────────────
