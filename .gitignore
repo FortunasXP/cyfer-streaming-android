@@ -45,3 +45,4 @@ app/libs/*.aar
 
 # ── Compose / Android temporary ──
 .kotlin/
+app/libs/*.aar.bak
