@@ -62,6 +62,17 @@ data class HdrVideoMetadata(
     val transfer: String? = null,
     val light: String? = null,
     val colorMatrix: String? = null,
+    /** "limited" (TV, 16–235) or "full" (PC, 0–255). A decoder that
+     *  mis-tags this is the most common Android colour bug — washed-out
+     *  greys (limited treated as full) or crushed shadows (reverse). */
+    val colorLevels: String? = null,
+    /** Decoder output pixel format ("p010" = real 10-bit decode,
+     *  "nv12" = 8-bit — 10-bit HDR content decoded to nv12 means the
+     *  SoC quietly threw away two bits and banding is back). */
+    val pixelFormat: String? = null,
+    /** Underlying format of hardware (zero-copy) frames — the one that
+     *  matters when pixelFormat just says "mediacodec". */
+    val hwPixelFormat: String? = null,
     val signalPeak: Double? = null,
     val maxCll: Double? = null,
     val maxFall: Double? = null,

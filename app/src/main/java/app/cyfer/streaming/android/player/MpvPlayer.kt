@@ -726,6 +726,9 @@ object MpvPlayer : MPV.EventObserver {
             "video-params/gamma" -> updateHdrVideo { it.copy(transfer = value) }
             "video-params/light" -> updateHdrVideo { it.copy(light = value) }
             "video-params/colormatrix" -> updateHdrVideo { it.copy(colorMatrix = value) }
+            "video-params/colorlevels" -> updateHdrVideo { it.copy(colorLevels = value) }
+            "video-params/pixelformat" -> updateHdrVideo { it.copy(pixelFormat = value) }
+            "video-params/hw-pixelformat" -> updateHdrVideo { it.copy(hwPixelFormat = value) }
         }
     }
 
@@ -737,6 +740,9 @@ object MpvPlayer : MPV.EventObserver {
                     transfer = value["gamma"]?.asString() ?: it.transfer,
                     light = value["light"]?.asString() ?: it.light,
                     colorMatrix = value["colormatrix"]?.asString() ?: it.colorMatrix,
+                    colorLevels = value["colorlevels"]?.asString() ?: it.colorLevels,
+                    pixelFormat = value["pixelformat"]?.asString() ?: it.pixelFormat,
+                    hwPixelFormat = value["hw-pixelformat"]?.asString() ?: it.hwPixelFormat,
                     signalPeak = value["sig-peak"]?.asDouble() ?: it.signalPeak,
                     maxCll = value["max-cll"]?.asDouble() ?: it.maxCll,
                     maxFall = value["max-fall"]?.asDouble() ?: it.maxFall,
@@ -878,6 +884,11 @@ object MpvPlayer : MPV.EventObserver {
             mpv.observeProperty("video-params/gamma", MPV.mpvFormat.MPV_FORMAT_STRING)
             mpv.observeProperty("video-params/light", MPV.mpvFormat.MPV_FORMAT_STRING)
             mpv.observeProperty("video-params/colormatrix", MPV.mpvFormat.MPV_FORMAT_STRING)
+            // Colour-correctness diagnostics: range tagging and the
+            // decoder's real output depth (p010 vs nv12).
+            mpv.observeProperty("video-params/colorlevels", MPV.mpvFormat.MPV_FORMAT_STRING)
+            mpv.observeProperty("video-params/pixelformat", MPV.mpvFormat.MPV_FORMAT_STRING)
+            mpv.observeProperty("video-params/hw-pixelformat", MPV.mpvFormat.MPV_FORMAT_STRING)
             mpv.observeProperty("video-params/sig-peak", MPV.mpvFormat.MPV_FORMAT_DOUBLE)
             mpv.observeProperty("video-params/max-cll", MPV.mpvFormat.MPV_FORMAT_DOUBLE)
             mpv.observeProperty("video-params/max-fall", MPV.mpvFormat.MPV_FORMAT_DOUBLE)

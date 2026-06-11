@@ -1352,6 +1352,13 @@ private fun HdrDiagnosticOverlay(state: MpvPlaybackState, modifier: Modifier = M
         }
         add("SOURCE     " + (hdr.detailedLabel))
         add("PRIM/TRC   " + listOfNotNull(hdr.primaries, hdr.transfer).joinToString(" / ").ifBlank { "—" })
+        // Colour-correctness essentials: range tagging (limited vs full
+        // mix-ups = washed or crushed blacks) and the decoder's actual
+        // output format (nv12 on 10-bit content = depth silently lost).
+        add("RANGE/FMT  " + listOfNotNull(
+            hdr.colorLevels,
+            hdr.hwPixelFormat ?: hdr.pixelFormat,
+        ).joinToString(" · ").ifBlank { "—" })
         add("SIG PEAK   " + (hdr.signalPeak?.let { "%.1f".format(it) } ?: "—") +
             "  CLL " + (hdr.maxCll?.toInt()?.toString() ?: "—") +
             "  FALL " + (hdr.maxFall?.toInt()?.toString() ?: "—"))
