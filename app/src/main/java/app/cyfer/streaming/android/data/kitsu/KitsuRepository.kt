@@ -40,22 +40,84 @@ object KitsuRepository {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
-    suspend fun getHome(): AnimeHomeFeed = coroutineScope {
-        val spotlightJob = async { fetchList("/anime?include=categories&sort=-userCount&page[limit]=5") }
+    private data class CachedHome(val feed: AnimeHomeFeed, val at: Long)
+
+    /** 15-minute TTL: hopping between tabs reuses the cache, but the
+     *  page tracks Kitsu's data (trending rotates, seasons roll over)
+     *  instead of freezing on the first fetch of the session. */
+    private const val HOME_TTL_MS = 15 * 60 * 1000L
+    @Volatile private var cachedHome: CachedHome? = null
+
+    /** Current broadcast season for the seasonal row — Kitsu's season
+     *  filter values are lowercase winter/spring/summer/fall. */
+    private fun currentSeason(): Pair<String, Int> {
+        val now = java.time.LocalDate.now()
+        val season = when (now.monthValue) {
+            in 1..3 -> "winter"
+            in 4..6 -> "spring"
+            in 7..9 -> "summer"
+            else -> "fall"
+        }
+        return season to now.year
+    }
+
+    /**
+     * The anime home feed, built entirely from time-anchored Kitsu
+     * queries so every row changes as Kitsu's data does:
+     *  - spotlight + trending — weekly trending endpoint
+     *  - airing               — currently broadcasting, most-followed
+     *  - seasonal             — this exact season (e.g. spring 2026)
+     *  - upcoming             — announced, most-anticipated
+     *  - topRated             — this year's popular titles by rating
+     *
+     * [forceRefresh] busts the TTL cache (pull-to-refresh).
+     */
+    suspend fun getHome(forceRefresh: Boolean = false): AnimeHomeFeed = coroutineScope {
+        cachedHome?.let { c ->
+            if (!forceRefresh && System.currentTimeMillis() - c.at < HOME_TTL_MS) {
+                return@coroutineScope c.feed
+            }
+        }
+        val (season, year) = currentSeason()
         val trendingJob = async { fetchList("/trending/anime?include=categories&page[limit]=10") }
         val airingJob = async { fetchList("/anime?include=categories&filter[status]=current&sort=-userCount&page[limit]=12") }
-        val popularJob = async { fetchList("/anime?include=categories&sort=-userCount&page[limit]=20") }
-        val popular = popularJob.await()
-        val topRated = popular
+        val seasonalJob = async {
+            fetchList("/anime?include=categories&filter[season]=$season&filter[seasonYear]=$year&sort=-userCount&page[limit]=14")
+        }
+        val upcomingJob = async {
+            fetchList("/anime?include=categories&filter[status]=upcoming&sort=-userCount&page[limit]=12")
+        }
+        // "Best of $year": pull the year's most-followed and re-rank by
+        // rating. Sorting Kitsu by -averageRating directly surfaces
+        // five-vote obscurities; the popularity pool keeps it honest.
+        val yearPopularJob = async {
+            fetchList("/anime?include=categories&filter[seasonYear]=$year&sort=-userCount&page[limit]=20")
+        }
+
+        val trending = trendingJob.await()
+        val seasonal = seasonalJob.await()
+        val topRated = yearPopularJob.await()
             .filter { it.voteAverage != null }
             .sortedByDescending { it.voteAverage ?: 0f }
             .take(12)
-        AnimeHomeFeed(
-            spotlight = spotlightJob.await(),
-            trending = trendingJob.await(),
+
+        val feed = AnimeHomeFeed(
+            // Trending drives the hero; fall back to the season's most
+            // followed if the trending endpoint hiccups.
+            spotlight = trending.ifEmpty { seasonal }.take(5),
+            trending = trending,
             airing = airingJob.await(),
+            seasonal = seasonal,
+            upcoming = upcomingJob.await(),
             topRated = topRated,
+            seasonLabel = season.replaceFirstChar { it.uppercase() } + " $year",
+            yearLabel = year.toString(),
         )
+        // Don't cache a dead feed (offline first paint) — retry next open.
+        if (feed.trending.isNotEmpty() || feed.seasonal.isNotEmpty() || feed.airing.isNotEmpty()) {
+            cachedHome = CachedHome(feed, System.currentTimeMillis())
+        }
+        feed
     }
 
     /** Pull a single anime by Kitsu id — used by the detail screen. */

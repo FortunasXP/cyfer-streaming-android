@@ -47,10 +47,24 @@ data class AnimeTitle(
 }
 
 data class AnimeHomeFeed(
+    /** Hero rotator — top of Kitsu's weekly trending, so the page
+     *  visibly changes as Kitsu's data does (the old feed used all-time
+     *  popularity, which froze the hero on the same evergreens). */
     val spotlight: List<AnimeTitle> = emptyList(),
     val trending: List<AnimeTitle> = emptyList(),
     val airing: List<AnimeTitle> = emptyList(),
+    /** The current broadcast season (e.g. everything airing Spring
+     *  2026), most-followed first. */
+    val seasonal: List<AnimeTitle> = emptyList(),
+    /** Announced/upcoming titles, most-followed first. */
+    val upcoming: List<AnimeTitle> = emptyList(),
+    /** Best of the current year — the year's popular titles re-ranked
+     *  by rating (popularity floor keeps 5-vote obscurities out). */
     val topRated: List<AnimeTitle> = emptyList(),
+    /** e.g. "Spring 2026" — eyebrow for the seasonal row. */
+    val seasonLabel: String = "",
+    /** e.g. "2026" — label for the best-of-year row. */
+    val yearLabel: String = "",
 )
 
 data class AnimeCatalogResult(

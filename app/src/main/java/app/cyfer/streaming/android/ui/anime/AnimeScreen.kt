@@ -39,6 +39,7 @@ import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AnimeScreen(
     onRequestSources: (SourcePickerRequest) -> Unit,
@@ -48,12 +49,19 @@ fun AnimeScreen(
 ) {
     var feed by remember { mutableStateOf<AnimeHomeFeed?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var refreshing by remember { mutableStateOf(false) }
+    val refreshScope = rememberCoroutineScope()
 
-    LaunchedEffect(Unit) {
-        runCatching { KitsuRepository.getHome() }
-            .onSuccess { feed = it }
-            .onFailure { error = "Failed to load anime data from Kitsu." }
+    suspend fun loadFeed(force: Boolean) {
+        runCatching { KitsuRepository.getHome(forceRefresh = force) }
+            .onSuccess { feed = it; error = null }
+            .onFailure { if (feed == null) error = "Failed to load anime data from Kitsu." }
     }
+
+    // First composition goes through the repository's 15-min TTL cache —
+    // instant when hopping tabs, but re-pulled once stale so the page
+    // follows Kitsu's trending/seasonal data instead of freezing.
+    LaunchedEffect(Unit) { loadFeed(force = false) }
 
     // ── Discover state ───────────────────────────────────────
     var genre by remember { mutableStateOf("All") }
@@ -91,11 +99,20 @@ fun AnimeScreen(
 
     LaunchedEffect(genre, status, season, sort) { loadDiscover(reset = true) }
 
-    // Wrap in a Box so we can overlay a top-left back button that the
-    // user can always tap. Edge-swipe back fights the horizontal LazyRow
-    // posters on this screen, so a visible button is the reliable way
-    // out — gesture back still works as a backup.
-    Box(modifier = modifier.fillMaxSize()) {
+    // PullToRefreshBox is a Box, so it doubles as the overlay host for
+    // the top-left back button. Pull busts the Kitsu TTL cache — the
+    // direct "show me what Kitsu says right now" gesture.
+    androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+        isRefreshing = refreshing,
+        onRefresh = {
+            refreshScope.launch {
+                refreshing = true
+                loadFeed(force = true)
+                refreshing = false
+            }
+        },
+        modifier = modifier.fillMaxSize(),
+    ) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -155,6 +172,15 @@ fun AnimeScreen(
                 )
                 Spacer(modifier = Modifier.height(24.dp))
             }
+            if (f.seasonal.isNotEmpty()) {
+                AnimeRow(
+                    title = "This season",
+                    eyebrow = f.seasonLabel.uppercase(),
+                    items = f.seasonal,
+                    onClick = { onOpenDetail(it) },
+                )
+                Spacer(modifier = Modifier.height(24.dp))
+            }
             if (f.airing.isNotEmpty()) {
                 AnimeRow(
                     title = "Currently airing",
@@ -164,10 +190,19 @@ fun AnimeScreen(
                 )
                 Spacer(modifier = Modifier.height(24.dp))
             }
+            if (f.upcoming.isNotEmpty()) {
+                AnimeRow(
+                    title = "Most anticipated",
+                    eyebrow = "COMING SOON",
+                    items = f.upcoming,
+                    onClick = { onOpenDetail(it) },
+                )
+                Spacer(modifier = Modifier.height(24.dp))
+            }
             if (f.topRated.isNotEmpty()) {
                 AnimeRow(
-                    title = "Top rated",
-                    eyebrow = "HIGHEST AVERAGE",
+                    title = "Best of ${f.yearLabel}",
+                    eyebrow = "HIGHEST RATED THIS YEAR",
                     items = f.topRated,
                     onClick = { onOpenDetail(it) },
                 )
