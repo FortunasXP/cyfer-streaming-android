@@ -363,6 +363,18 @@ fun PlayerScreen(
     var copySwapTried by remember(url) { mutableStateOf(false) }
     var decoderFailReported by remember(url) { mutableStateOf(false) }
     LaunchedEffect(url) {
+        // The 12 s no-first-frame judgement must not start until the
+        // file is actually open (duration lands at FILE_LOADED): a slow
+        // debrid/torrent source can take longer than that just to
+        // deliver headers, and a phantom "decoder failed" copy-swap
+        // reload only restarts the slow open from scratch. Cap the wait
+        // so a source that never opens is left to the stall watchdog.
+        var waitedMs = 0
+        while (playbackState.duration <= 0 && waitedMs < 120_000) {
+            delay(250)
+            waitedMs += 250
+        }
+        if (playbackState.duration <= 0) return@LaunchedEffect
         delay(12_000)
         if (!copySwapTried && !playbackState.idle && playbackState.position < 0.05) {
             copySwapTried = true
@@ -376,6 +388,21 @@ fun PlayerScreen(
             decoderFailReported = true
             MpvPlayer.markDecoderFailed()
         }
+    }
+    // "Switching decoder mode…" / "Reconnecting…" are transient by
+    // nature but nothing used to clear them — once their reload worked,
+    // the toast stayed up for the rest of the session. Clear as soon as
+    // playback has visibly advanced past where it was when the badge
+    // appeared.
+    LaunchedEffect(playbackState.streamHealth) {
+        val transient = playbackState.streamHealth == StreamHealth.HardwareCopyFallback ||
+            playbackState.streamHealth == StreamHealth.Recovering
+        if (!transient) return@LaunchedEffect
+        val baseline = playbackState.position
+        while (playbackState.position < baseline + 2.0) {
+            delay(500)
+        }
+        MpvPlayer.clearStreamHealth()
     }
 
     // ── Stall watchdog (auto-retry on dead source) ───────────────────
@@ -545,46 +572,12 @@ fun PlayerScreen(
             StreamHealthToast(health = playbackState.streamHealth)
         }
 
-        // One-shot Dolby Vision P5 warning. Hardware decode renders the
-        // P5 base layer without the RPU reshape (FFmpeg's mediacodec
-        // wrapper doesn't parse RPUs), and a P5 base layer is IPTPQc2 —
-        // i.e. visibly wrong colours. No player setting can fix it, so
-        // point the user at the actual remedy: an HDR10 / DV P8 source.
-        // Gated on position > 0 so colormatrix has settled (a reshaped
-        // SW-decoded file reports colormatrix=dolbyvision by then).
-        var dvWarningDismissed by remember(url) { mutableStateOf(false) }
-        val showDvWarning = !dvWarningDismissed &&
-            playbackState.hdrVideo.dolbyVisionP5BaseLayer &&
-            playbackState.position > 0 &&
-            playbackState.streamHealth == StreamHealth.Normal &&
-            !inPip && !isLoading
-        LaunchedEffect(showDvWarning) {
-            if (showDvWarning) {
-                delay(8000)
-                dvWarningDismissed = true
-            }
-        }
-        AnimatedVisibility(
-            visible = showDvWarning,
-            enter = fadeIn() + androidx.compose.animation.slideInVertically { -it },
-            exit = fadeOut(),
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .statusBarsPadding()
-                .padding(top = 14.dp),
-        ) {
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = Color.Black.copy(alpha = 0.78f),
-            ) {
-                Text(
-                    text = "⚠ Dolby Vision P5 — colours can't be decoded correctly on this device. Pick an HDR10 or DV P8 source.",
-                    color = androidx.compose.ui.graphics.Color(0xFFFFB300),
-                    style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                )
-            }
-        }
+        // NOTE: the old "DV P5 — colours can't be decoded correctly"
+        // warning pill is gone. P5 plays correctly now: the player
+        // preloads mediacodec-copy before the decoder starts (vid-gated
+        // load + applyDolbyVisionDecodePolicy) and the patched FFmpeg
+        // feeds libplacebo the RPUs. The HDR pipeline overlay still
+        // reports the residual reshape=OFF case for diagnostics.
 
         // Apple TV-style controls overlay (hidden in PiP and when locked)
         AnimatedVisibility(visible = controlsVisible && !isLoading && !inPip && !locked, enter = fadeIn(), exit = fadeOut()) {
@@ -1365,6 +1358,9 @@ private fun HdrDiagnosticOverlay(state: MpvPlaybackState, modifier: Modifier = M
         hdr.dolbyVisionProfile?.let { p ->
             val reshape = when {
                 hdr.dolbyVisionReshapeActive -> "reshape=on"
+                hdr.dolbyVisionRpuBlockedByZeroCopy && p == 5 ->
+                    "reshape=BLOCKED (zero-copy)"
+                hdr.dolbyVisionRpuBlockedByZeroCopy -> "reshape=off (zero-copy · HDR10 BL)"
                 hdr.dolbyVisionP5BaseLayer -> "reshape=OFF (P5 BL — wrong colours)"
                 else -> "reshape=off (HDR10 BL)"
             }

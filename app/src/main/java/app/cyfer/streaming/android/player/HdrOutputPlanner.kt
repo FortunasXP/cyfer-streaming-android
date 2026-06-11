@@ -60,7 +60,9 @@ fun planHdrOutput(
     eglHdrCapable: Boolean = true,
 ): HdrOutputPlan {
     // Be honest about what the DV path is actually doing: "reshape" only
-    // when frames carry RPUs (colormatrix=dolbyvision), otherwise we're
+    // when frames carry RPUs (colormatrix=dolbyvision) AND the decode
+    // path lets libplacebo apply them — copy/SW; zero-copy frames are
+    // driver-converted to RGB before the shader. Otherwise we're
     // rendering the base layer — fine for P8 (BL = real HDR10/HLG),
     // visibly wrong for P5 (BL = IPTPQc2).
     val dvNote = when {

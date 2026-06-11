@@ -111,6 +111,14 @@ object MpvPlayer : MPV.EventObserver {
 
     private var initialized = false
     private var currentHwdec: String = "mediacodec"
+    /** The hwdec mode the user actually chose (Settings). [currentHwdec]
+     *  can diverge transiently — watchdog copy fallback, or the DV P5
+     *  copy-mode forcing in [applyDolbyVisionDecodePolicy] — and this is
+     *  what we restore to afterwards. */
+    private var preferredHwdec: String = "mediacodec"
+    /** True while [applyDolbyVisionDecodePolicy] is overriding the
+     *  preferred mode with mediacodec-copy for a DV P5 file. */
+    private var dvForcedCopy = false
     /** Last URL we asked mpv to load. Used by reloadCurrent() so the
      *  stall + first-frame watchdogs can recover without the caller
      *  having to thread it through. */
@@ -143,6 +151,9 @@ object MpvPlayer : MPV.EventObserver {
      * same mode is a no-op.
      */
     fun setHardwareDecoding(mpvHwdecValue: String) {
+        preferredHwdec = mpvHwdecValue
+        // An explicit user choice trumps the DV P5 copy-forcing.
+        dvForcedCopy = false
         if (mpvHwdecValue == currentHwdec) return
         currentHwdec = mpvHwdecValue
         if (initialized) {
@@ -272,10 +283,11 @@ object MpvPlayer : MPV.EventObserver {
         //  - tone-mapping-mode: removed upstream in mpv 0.37; libplacebo
         //    picks the hybrid behaviour automatically now.
         //  - vd-lavc-o=dovi_strip: never existed in FFmpeg — the old
-        //    "strip DV → HDR10" mode was a silent no-op. On the
-        //    mediacodec path the base layer is all we get anyway (the
-        //    HW wrapper decoder doesn't parse RPUs), so P8 content
-        //    already renders as plain HDR10.
+        //    "strip DV → HDR10" mode was a silent no-op. Our patched
+        //    mediacodec wrapper now parses RPUs on hardware decode;
+        //    where they can actually be applied is decided by
+        //    applyDolbyVisionDecodePolicy (P5 → copy mode, P8 stays
+        //    zero-copy rendering its HDR10 base layer).
 
         applyOutputPlan(hdrCaps)
     }
@@ -414,6 +426,13 @@ object MpvPlayer : MPV.EventObserver {
         // into an SDR file that follows it).
         lastOutputPlan = null
         reapplyOutputPlan()
+        // Open with video deselected: the decoder must not spin up
+        // until the DV decode policy has seen the track list and chosen
+        // hwdec (P5 → mediacodec-copy). FILE_LOADED re-selects video —
+        // by then the right mode is in place, so a P5 file starts
+        // directly on the copy path instead of flashing wrong colours
+        // on zero-copy and reinitialising the decoder mid-start.
+        setOption("vid", "no")
         mpv.command("loadfile", url)
     }
 
@@ -450,6 +469,35 @@ object MpvPlayer : MPV.EventObserver {
         setOption("hwdec", "mediacodec-copy")
         _state.update { it.copy(streamHealth = StreamHealth.HardwareCopyFallback) }
         currentUrl?.let { mpv.command("loadfile", it) }
+    }
+
+    /**
+     * DV P5 cannot render correct colours over the zero-copy surface
+     * path even though our patched FFmpeg attaches the RPUs there: the
+     * GPU driver converts the frame to RGB with a fixed YCbCr matrix at
+     * sample time, scrambling P5's ICtCp samples before libplacebo's
+     * reshape shader can run. mediacodec-copy keeps the hardware decoder
+     * but hands libplacebo the raw planes, so the reshape applies
+     * faithfully. P8 stays zero-copy — its base layer is genuine
+     * HDR10/HLG, so skipping the reshape there is correct and cheaper.
+     * Called from [refreshTrackList] while video is still deselected
+     * (loadUrl gates vid=no until this has run), so the decoder's first
+     * start is already in the right mode — no zero-copy flash, no
+     * mid-start reinit. Restores the user's preferred mode when a
+     * non-P5 file follows.
+     */
+    private fun applyDolbyVisionDecodePolicy(dvProfile: Int?) {
+        if (dvProfile == 5 && currentHwdec == "mediacodec") {
+            Log.i(TAG, "DV P5 on zero-copy hwdec — forcing mediacodec-copy so the RPU reshape applies")
+            dvForcedCopy = true
+            currentHwdec = "mediacodec-copy"
+            setOption("hwdec", "mediacodec-copy")
+        } else if (dvProfile != 5 && dvForcedCopy) {
+            Log.i(TAG, "Non-P5 file after a forced-copy DV P5 — restoring hwdec=$preferredHwdec")
+            dvForcedCopy = false
+            currentHwdec = preferredHwdec
+            setOption("hwdec", preferredHwdec)
+        }
     }
 
     /**
@@ -719,7 +767,13 @@ object MpvPlayer : MPV.EventObserver {
 
     override fun eventProperty(property: String, value: String) {
         when (property) {
-            "hwdec-current" -> _state.update { it.copy(hwdec = value) }
+            "hwdec-current" -> {
+                _state.update { it.copy(hwdec = value) }
+                // The DV reshape signals are decode-path-dependent
+                // (zero-copy blocks a faithful reshape) — keep the HDR
+                // metadata's view of the path in sync.
+                updateHdrVideo { it.copy(hwdecActive = value) }
+            }
             "video-codec" -> _state.update { it.copy(videoCodec = value) }
             "audio-codec-name" -> _state.update { it.copy(audioCodec = value) }
             "video-params/primaries" -> updateHdrVideo { it.copy(primaries = value) }
@@ -772,6 +826,15 @@ object MpvPlayer : MPV.EventObserver {
                 observeProperties()
                 refreshTrackList()
                 refreshChapterList()
+                // loadUrl() opened the file with vid=no so no video
+                // decoder existed while refreshTrackList() ran the DV
+                // decode policy. hwdec is now right for this file —
+                // select video and let the decoder start once, in the
+                // correct mode. Skip while the surface is detached
+                // (locked): attachSurface() restores the track then.
+                if (savedVidForDetach == null) {
+                    runCatching { mpv.setPropertyString("vid", "auto") }
+                }
                 _state.update { it.copy(idle = false) }
             }
             MPV.mpvEvent.MPV_EVENT_END_FILE -> {
@@ -796,6 +859,7 @@ object MpvPlayer : MPV.EventObserver {
         val subs = mutableListOf<MpvTrack>()
         var dvProfile: Int? = null
         var dvLevel: Int? = null
+        var dvFromSelected = false
         for (el in parsed) {
             val obj = el as? JsonObject ?: continue
             val type = (obj["type"] as? JsonPrimitive)?.contentOrNull
@@ -812,17 +876,21 @@ object MpvPlayer : MPV.EventObserver {
                 "audio" -> audio += track
                 "sub" -> subs += track
                 "video" -> {
-                    // libmpv exposes Dolby Vision metadata on the active
-                    // video track via `dolby-vision-profile` /
-                    // `dolby-vision-level` (added in mpv 0.36+ via the
-                    // libplacebo+ffmpeg integration). Either field can
-                    // be missing for non-DV streams.
+                    // libmpv exposes Dolby Vision metadata on the video
+                    // track via `dolby-vision-profile` /
+                    // `dolby-vision-level` (demuxer-level, so present
+                    // before any decoding). Prefer the selected track,
+                    // but during the gated load nothing is selected yet
+                    // (vid=no until the DV policy has chosen hwdec) —
+                    // fall back to the first video track, which is what
+                    // vid=auto will pick.
                     val isSelected = (obj["selected"] as? JsonPrimitive)?.booleanOrNull ?: false
-                    if (isSelected) {
+                    if (isSelected || (!dvFromSelected && dvProfile == null)) {
                         dvProfile = (obj["dolby-vision-profile"] as? JsonPrimitive)?.intOrNull
                             ?: (obj["dv-profile"] as? JsonPrimitive)?.intOrNull
                         dvLevel = (obj["dolby-vision-level"] as? JsonPrimitive)?.intOrNull
                             ?: (obj["dv-level"] as? JsonPrimitive)?.intOrNull
+                        dvFromSelected = isSelected
                     }
                 }
             }
@@ -840,6 +908,9 @@ object MpvPlayer : MPV.EventObserver {
         if (dvProfile != null) {
             Log.i(TAG, "Detected Dolby Vision profile=$dvProfile level=${dvLevel ?: "?"}")
         }
+        // P5 needs the copy-mode decoder for the reshape to be faithful;
+        // anything else gets the user's preferred mode back.
+        applyDolbyVisionDecodePolicy(dvProfile)
         // Fresh DV metadata can change the output plan ("DV P8.1 → PQ"
         // vs the generic HDR label) — recompute now that we know.
         reapplyOutputPlan()

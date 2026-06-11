@@ -80,6 +80,11 @@ data class HdrVideoMetadata(
     val dolbyVisionProfile: Int? = null,
     /** Dolby Vision compatibility level (1 = HDR10-compat, 4 = HLG-compat). */
     val dolbyVisionLevel: Int? = null,
+    /** Active decode path as reported by mpv's `hwdec-current`:
+     *  "mediacodec" (zero-copy surface), "mediacodec-copy" (HW decode,
+     *  planes copied to memory), or "no" (software). Context for the DV
+     *  reshape signals below — the reshape is path-dependent. */
+    val hwdecActive: String? = null,
 ) {
     private val haystack: String
         get() = listOfNotNull(primaries, transfer, light, colorMatrix)
@@ -98,22 +103,38 @@ data class HdrVideoMetadata(
             (maxFall ?: 0.0) > 0.0
 
     /**
-     * True when libplacebo will actually apply the DV RPU reshape. mpv
-     * flips `video-params/colormatrix` to "dolbyvision" only when the
-     * decoded frames carry RPU metadata — which on this pipeline means
-     * the software decoder produced them. Hardware mediacodec frames
-     * never carry RPUs (FFmpeg's wrapper doesn't parse them), so DV
-     * files decoded in hardware keep colormatrix=bt.2020-ncl and render
-     * the base layer only.
+     * True when libplacebo will actually apply the DV RPU reshape. Two
+     * conditions, both required:
+     *  1. The decoded frames carry RPU metadata — mpv flips
+     *     `video-params/colormatrix` to "dolbyvision" only then. Our
+     *     patched FFmpeg parses RPUs in the mediacodec wrapper too, so
+     *     hardware-decoded frames now qualify.
+     *  2. libplacebo receives the raw YUV planes. On the zero-copy
+     *     surface path ("mediacodec") the GPU driver converts frames to
+     *     RGB with a fixed YCbCr matrix at sample time — P5's ICtCp
+     *     samples are scrambled before the reshape shader runs, so RPUs
+     *     present + zero-copy still renders wrong colours. Copy mode and
+     *     software decode upload the true planes; the reshape is
+     *     faithful there.
      */
     val dolbyVisionReshapeActive: Boolean
-        get() = (colorMatrix ?: "").lowercase().contains("dolbyvision")
+        get() = (colorMatrix ?: "").lowercase().contains("dolbyvision") &&
+            hwdecActive != "mediacodec"
+
+    /** RPUs are flowing but the zero-copy surface path blocks a faithful
+     *  reshape (driver-side YCbCr→RGB happens before the shader sees the
+     *  samples). The player auto-switches DV P5 to mediacodec-copy when
+     *  it detects the profile, so for P5 this state is transient. */
+    val dolbyVisionRpuBlockedByZeroCopy: Boolean
+        get() = (colorMatrix ?: "").lowercase().contains("dolbyvision") &&
+            hwdecActive == "mediacodec"
 
     /**
-     * DV profile 5 decoding without the reshape: the P5 base layer is
+     * DV profile 5 rendering without the reshape: the P5 base layer is
      * IPTPQc2-encoded, so without the RPU pass the colours are wrong
-     * (the classic green/purple tint). Worth a user-facing warning —
-     * the fix is picking an HDR10 or DV P8 source instead.
+     * (the classic green/purple tint). The player auto-switches P5 to
+     * mediacodec-copy, so if this persists the copy path also failed to
+     * surface RPUs — the remedy is an HDR10 or DV P8 source instead.
      */
     val dolbyVisionP5BaseLayer: Boolean
         get() = dolbyVisionProfile == 5 && !dolbyVisionReshapeActive
