@@ -10,10 +10,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -55,11 +54,12 @@ private const val DETAIL_TIMEOUT_MS = 5_000L
 private const val DEFAULT_LIMIT = 12
 private const val DETAIL_FETCH_LIMIT = 8
 private const val NYAA_FETCH_LIMIT = 28
-// Bumped from 5 → 10 so multi-title anime requests (canonical + romaji +
-// English + Japanese, each fanned out across S/E format variants) don't
-// get truncated to "first title only" before we even hit the second
-// candidate. Trackers respond fast; the extra round-trips are cheap.
-private const val MAX_NYAA_QUERY_COUNT = 10
+// Nyaa fan-out cap. These queries all hit nyaa.si, now gated by a
+// 3-permit semaphore — so the count is "how deep we probe", not "how
+// many run at once". 6 covers romaji + English across the main S/E
+// format variants (the kanji title rarely matches Nyaa's romaji index)
+// without dragging the search into rate-limit territory.
+private const val MAX_NYAA_QUERY_COUNT = 6
 private const val MAX_NYAA_GROUP_QUERY_COUNT = 4
 private const val TOKYOTOSHO_FETCH_LIMIT = 28
 private const val BANGUMI_FETCH_LIMIT = 28
@@ -94,29 +94,30 @@ private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 private data class CachedText(val expiresAt: Long, val text: String)
 
 private val fetchTextCache = ConcurrentHashMap<String, CachedText>()
-private val hostMutexes = ConcurrentHashMap<String, Mutex>()
-private val hostLastFetchAt = ConcurrentHashMap<String, Long>()
+private val hostSemaphores = ConcurrentHashMap<String, Semaphore>()
 
 private fun hostForUrl(url: String): String =
     runCatching { URI(url).host?.lowercase().orEmpty() }.getOrDefault("")
 
-private fun fetchCooldownForHost(host: String): Long =
-    if (Regex("(^|\\.)nyaa\\.", RegexOption.IGNORE_CASE).containsMatchIn(host)) 850L else 0L
+/**
+ * Concurrent requests permitted per host. The previous model used a
+ * per-host Mutex *plus* an 850 ms cooldown, fully serialising every
+ * request to a host — catastrophic for anime, where nyaa, Erai-raws and
+ * ToonsHub all hit nyaa.si and the search fans out ~10 queries: that's
+ * ~15 s of sequential round-trips before a single result appears.
+ *
+ * A small semaphore keeps us polite (nyaa 429s if hammered) while
+ * letting the fan-out actually run in parallel. nyaa gets a tighter cap
+ * than general trackers because it rate-limits hardest.
+ */
+private fun maxConcurrentForHost(host: String): Int =
+    if (Regex("(^|\\.)nyaa\\.", RegexOption.IGNORE_CASE).containsMatchIn(host)) 3 else 5
 
 private suspend fun <T> withHostFetchSlot(url: String, task: suspend () -> T): T {
     val host = hostForUrl(url)
     if (host.isEmpty()) return task()
-    val mutex = hostMutexes.getOrPut(host) { Mutex() }
-    return mutex.withLock {
-        val cooldown = fetchCooldownForHost(host)
-        val waitFor = (hostLastFetchAt[host] ?: 0L) + cooldown - System.currentTimeMillis()
-        if (waitFor > 0) delay(waitFor)
-        try {
-            task()
-        } finally {
-            hostLastFetchAt[host] = System.currentTimeMillis()
-        }
-    }
+    val sem = hostSemaphores.getOrPut(host) { Semaphore(maxConcurrentForHost(host)) }
+    return sem.withPermit { task() }
 }
 
 private suspend fun fetchText(url: String, timeoutMs: Long): String {

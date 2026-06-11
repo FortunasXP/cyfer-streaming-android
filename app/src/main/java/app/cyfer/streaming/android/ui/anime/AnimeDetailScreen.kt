@@ -109,7 +109,11 @@ fun AnimeDetailScreen(
                 inWatchlist = inWatchlist,
                 onBack = onBack,
                 onPlay = {
-                    if (hydrated.animeKind == "movie" || episodes.isEmpty()) {
+                    // Movies and single-entry titles (a lone OVA/film, or
+                    // a series Kitsu has no episode list for) play via a
+                    // plain title search — matches trackers better than a
+                    // fabricated "S01E01" for something that isn't episodic.
+                    if (hydrated.isMovie || episodes.size <= 1) {
                         playRequest()
                     } else {
                         val first = episodes.firstOrNull { it.seasonNumber == 1 }
@@ -163,7 +167,12 @@ fun AnimeDetailScreen(
             }
         }
 
-        if (hydrated.animeKind == "series") {
+        // Episode list only for genuinely episodic titles. A "series"
+        // whose Kitsu episode list resolves to a single entry is a film
+        // or one-shot mistagged upstream — showing a lonely "EP 01" row
+        // is the "1 ep anime" we're trying to kill, so fall through to
+        // the direct Play button instead.
+        if (hydrated.animeKind == "series" && (episodesLoading || episodes.size != 1)) {
             item {
                 Text(
                     text = "EPISODES",
@@ -284,8 +293,8 @@ private fun AnimeDetailHero(
                     }
                 }
                 item.year?.let { Text(it, color = CyferTextSecondary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold) }
-                item.episodeCount?.let { Text("$it eps", color = CyferTextSecondary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold) }
-                if (item.animeKind == "movie") Text("Movie", color = CyferTextSecondary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                item.episodeCountLabel?.let { Text(it, color = CyferTextSecondary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold) }
+                if (item.isMovie) Text("Movie", color = CyferTextSecondary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                 item.status?.let { Text(it, color = CyferTextSecondary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold) }
             }
             Spacer(modifier = Modifier.height(4.dp))
@@ -298,7 +307,7 @@ private fun AnimeDetailHero(
                     ) {
                         Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = CyferBlack)
                         Text(
-                            text = if (item.animeKind == "movie") "Play" else "Play S1 · EP1",
+                            text = if (item.isMovie) "Play" else "Play S1 · EP1",
                             color = CyferBlack,
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,

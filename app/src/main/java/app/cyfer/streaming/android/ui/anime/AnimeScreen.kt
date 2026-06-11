@@ -393,7 +393,7 @@ private fun DiscoverPosterCard(item: AnimeTitle, onClick: () -> Unit) {
         )
         val sub = listOfNotNull(
             item.voteAverage?.let { "★ %.1f".format(it) },
-            if (item.animeKind == "movie") "Movie" else item.episodeCount?.let { "$it eps" },
+            if (item.isMovie) "Movie" else item.episodeCountLabel,
             item.year,
         ).joinToString("  ·  ")
         if (sub.isNotEmpty()) {
@@ -484,10 +484,10 @@ private fun AnimeHero(item: AnimeTitle, onPlay: () -> Unit) {
                 item.year?.let {
                     Text(it, color = CyferTextSecondary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                 }
-                item.episodeCount?.let {
-                    Text("$it eps", color = CyferTextSecondary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                item.episodeCountLabel?.let {
+                    Text(it, color = CyferTextSecondary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                 }
-                if (item.animeKind == "movie") {
+                if (item.isMovie) {
                     Text("Movie", color = CyferTextSecondary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
                 }
             }
@@ -652,9 +652,9 @@ private fun AnimePosterCard(item: AnimeTitle, onClick: () -> Unit) {
         )
         val meta = buildString {
             item.voteAverage?.let { append("★ %.1f".format(it)) }
-            if (item.voteAverage != null && (item.episodeCount != null || item.animeKind == "movie")) append("  ·  ")
-            if (item.animeKind == "movie") append("Movie")
-            else item.episodeCount?.let { append("$it eps") }
+            val tail = if (item.isMovie) "Movie" else item.episodeCountLabel
+            if (item.voteAverage != null && tail != null) append("  ·  ")
+            if (tail != null) append(tail)
         }
         if (meta.isNotEmpty()) {
             Text(

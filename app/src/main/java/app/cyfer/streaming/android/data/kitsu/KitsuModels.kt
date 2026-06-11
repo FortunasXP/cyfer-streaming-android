@@ -36,6 +36,17 @@ data class AnimeTitle(
     /** "series" | "movie" — derived from subtype. */
     val animeKind: String = "series",
 ) {
+    /** True for single-film entries (Kitsu subtype "movie"). Drives the
+     *  "Movie" chip + direct-play instead of an episode list. */
+    val isMovie: Boolean get() = animeKind == "movie"
+
+    /** Episode-count chip text, or null when showing it would mislead:
+     *  movies, and any single-entry title (a lone OVA/special or a film
+     *  Kitsu reports with episodeCount=1). Rendering "1 eps" is exactly
+     *  what made anime films read as one-episode series. */
+    val episodeCountLabel: String? get() =
+        if (!isMovie && (episodeCount ?: 0) > 1) "$episodeCount eps" else null
+
     /** Every distinct title we know for this anime, in tracker-friendly
      *  order: romaji first (most matches), then English, then Japanese. */
     val allSearchableTitles: List<String> get() = listOfNotNull(
