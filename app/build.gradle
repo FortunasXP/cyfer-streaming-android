@@ -70,6 +70,17 @@ android {
         }
     }
 
+    packaging {
+        jniLibs {
+            // Keep native libs deflate-compressed in the APK (legacy
+            // packaging). The libdovi AAR carries ~128 MB of .so per
+            // ABI — stored-uncompressed flips a side-loaded build from
+            // ~155 MB to ~205 MB. These are dev builds moved over
+            // USB/Drive, so favour transfer size over install speed.
+            useLegacyPackaging = true
+        }
+    }
+
     // Produce one APK per ABI alongside the universal one so it's easy
     // to ship a smaller per-device build (≈70-80 MB instead of 200 MB).
     splits {
