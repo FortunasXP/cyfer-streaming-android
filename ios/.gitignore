@@ -1,0 +1,7 @@
+Cyfer.xcodeproj/
+Support/Info.plist
+build/
+xcuserdata/
+
+# The repo ignores *.png (screenshots); asset catalog images are real sources.
+!Cyfer/Assets.xcassets/**/*.png
