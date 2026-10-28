@@ -11,6 +11,15 @@ struct LaunchView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     private static let recentsKey = "recentLinks"
+    /// Freely hosted samples: Apple's HLS demo for AVFoundation, Jellyfin's MKVs for mpv.
+    private static let testStreams: [(title: String, detail: String, url: String)] = [
+        ("Dolby Vision + Atmos", "Apple HLS demo · AVFoundation",
+         "https://devstreaming-cdn.apple.com/videos/streaming/examples/adv_dv_atmos/main.m3u8"),
+        ("Jellyfish 1080p HEVC 10-bit", "MKV · 40 Mb/s · mpv",
+         "https://repo.jellyfin.org/archive/jellyfish/media/jellyfish-40-mbps-hd-hevc-10bit.mkv"),
+        ("Jellyfish 4K HEVC 10-bit", "MKV · 120 Mb/s · mpv",
+         "https://repo.jellyfin.org/archive/jellyfish/media/jellyfish-120-mbps-4k-uhd-hevc-10bit.mkv"),
+    ]
     private static let videoExtensions: Set<String> = ["mkv", "mp4", "m4v", "mov", "ts", "m2ts", "webm", "avi", "m3u8"]
 
     var body: some View {
@@ -52,6 +61,21 @@ struct LaunchView: View {
                     Text("Play a link")
                 } footer: {
                     Text("Auto tries AVFoundation first and hands over to mpv when it can't open the file, the way the Android app goes from ExoPlayer to mpv.")
+                }
+
+                Section("Test streams") {
+                    ForEach(Self.testStreams, id: \.url) { stream in
+                        Button {
+                            if let url = URL(string: stream.url) {
+                                playing = PlayRequest(url: url, title: stream.title, preference: preference)
+                            }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(stream.title).foregroundColor(.white)
+                                Text(stream.detail).font(.caption).foregroundColor(.secondary)
+                            }
+                        }
+                    }
                 }
 
                 Section {
