@@ -45,4 +45,5 @@ jobs:
 
       - name: Errors
         if: failure()
-        run: grep -E "error:|warning: .*(deprecated|never used)" build.log | head -80 || true
+        run: |
+          grep -E "error:" build.log | head -80 || true
