@@ -32,6 +32,8 @@ targets:
       path: Support/Info.plist
       properties:
         CFBundleDisplayName: Cyfer
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
         UISupportedInterfaceOrientations:

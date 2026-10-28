@@ -94,7 +94,9 @@ final class AVEngine: NSObject, PlayerEngine {
             player.defaultRate = rate
             player.playImmediately(atRate: rate)
             report { $0.loading = false }
-            Task { [weak self] in await self?.inspect(item) }
+            let asset = item.asset
+            let tracks = item.tracks.compactMap { $0.assetTrack }
+            Task { [weak self] in await self?.inspect(item, asset: asset, tracks: tracks) }
         case .failed:
             fail(item.error?.localizedDescription ?? "AVFoundation couldn't play this")
         default:
@@ -128,16 +130,14 @@ final class AVEngine: NSObject, PlayerEngine {
     }
 
     /// Tracks, codec and dynamic range once the item is ready.
-    private func inspect(_ item: AVPlayerItem) async {
-        let asset = item.asset
+    private func inspect(_ item: AVPlayerItem, asset: AVAsset, tracks: [AVAssetTrack]) async {
         let audio = (try? await asset.loadMediaSelectionGroup(for: .audible)) ?? nil
         let legible = (try? await asset.loadMediaSelectionGroup(for: .legible)) ?? nil
 
         var range = DynamicRange.sdr
         var facts: [(String, String)] = []
         var audioCodec: String?
-        for track in item.tracks {
-            guard let assetTrack = track.assetTrack else { continue }
+        for assetTrack in tracks {
             let descriptions = (try? await assetTrack.load(.formatDescriptions)) ?? []
             guard let desc = descriptions.first else { continue }
             let fourCC = Self.fourCC(CMFormatDescriptionGetMediaSubType(desc))
