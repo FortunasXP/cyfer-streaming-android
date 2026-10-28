@@ -1,0 +1,48 @@
+name: iOS build
+
+on:
+  push:
+    branches: [ios-spike]
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          brew install xcodegen
+          xcodebuild -version
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - uses: actions/cache@v4
+        with:
+          path: ios/build/spm
+          key: spm-${{ hashFiles('ios/project.yml') }}
+
+      # Unsigned device build: proves it compiles and links; signing happens on the Mac.
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Cyfer.xcodeproj \
+            -scheme Cyfer \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/dd \
+            -clonedSourcePackagesDirPath build/spm \
+            CODE_SIGNING_ALLOWED=NO \
+            -quiet 2>&1 | tee build.log
+
+      - name: Errors
+        if: failure()
+        run: grep -E "error:|warning: .*(deprecated|never used)" build.log | head -80 || true
